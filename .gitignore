@@ -1,0 +1,11 @@
+# 运行时产物
+tray.pid
+status.json
+keylight.log
+.settings-shown
+
+# 可能含本机隐私的诊断输出
+src/__pycache__/
+*.pyc
+devices.txt
+sysinfo.txt

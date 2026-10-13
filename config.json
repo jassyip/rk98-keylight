@@ -1,0 +1,44 @@
+{
+  "device": {
+    "vid": "258A",
+    "pid": "00C1",
+    "preferred_collection": "Col05"
+  },
+  "running": {
+    "mode": "rainbow",
+    "color": "#FF0000",
+    "fps": 30,
+    "brightness": 0.8,
+    "speed": 40
+  },
+  "done": {
+    "color": "#00FF00",
+    "mode": "flash",
+    "times": 3,
+    "on_ms": 200,
+    "off_ms": 120
+  },
+  "waiting": {
+    "mode": "flow",
+    "color": "#FF0000",
+    "fps": 30,
+    "brightness": 0.8,
+    "speed": 40
+  },
+  "idle": {
+    "mode": "hardware"
+  },
+  "conflict": {
+    "close_rk_app": false
+  },
+  "service": {
+    "port": 18990,
+    "stale_session_secs": 600,
+    "final_grace_secs": 30,
+    "notice_secs": 20
+  },
+  "source": {
+    "tail_hook_events": false,
+    "hook_events_path": ""
+  }
+}
