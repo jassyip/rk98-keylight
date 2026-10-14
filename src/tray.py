@@ -151,6 +151,11 @@ class App:
             pystray.MenuItem("测试: 完成", lambda: self.ui_q.put(("test", "DONE"))),
             pystray.MenuItem("演示: 分区(3 任务)", lambda: self.ui_q.put(("demo",))),
             pystray.MenuItem("演示: 溢出(10 任务)", lambda: self.ui_q.put(("demo_overflow",))),
+            pystray.MenuItem("重新扫描当前任务", lambda: self.ui_q.put(("rescan",))),
+            pystray.MenuItem(
+                lambda item: ("切换: 分区(每排一任务) → 全局" if self.svc.partition_on
+                              else "切换: 全局(单状态) → 分区"),
+                lambda: self.ui_q.put(("toggle_mode",))),
             pystray.MenuItem("恢复硬件灯效", lambda: self.ui_q.put(("restore",))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda: self.ui_q.put(("quit",))),
@@ -225,10 +230,26 @@ class App:
             self.svc.inject_demo(overflow=False, secs=30)
         elif kind == "demo_overflow":
             self.svc.inject_demo(overflow=True, secs=30)
+        elif kind == "rescan":
+            # 重新抓取当前任务状态(演示/清空后恢复真实会话)
+            n = self.svc.rescan_sessions()
+            self._notify("已重新扫描: %d 条事件已重放" % n)
+        elif kind == "toggle_mode":
+            # 分区(每排一任务) / 全局(单状态) 双模式切换
+            on = self.svc.toggle_partition()
+            self.svc.rescan_sessions()
+            self._notify("已切换: %s" % ("分区模式 · 每排一任务" if on
+                                        else "全局模式 · 单状态流水"))
         elif kind == "restore":
             self.svc.clear_sessions()
         elif kind == "quit":
             self.quit()
+
+    def _notify(self, msg):
+        try:
+            self.tray.notify(msg, "wb-keylight")
+        except Exception:
+            log.info("托盘通知: %s", msg)
 
     # ---------------- 设置窗口 ----------------
     def show_settings(self):
@@ -358,7 +379,9 @@ class SettingsWindow:
             row=3, column=0, columnspan=2, sticky="w", **pad)
         ttk.Button(f_part, text="演示溢出(10 任务)", command=self._demo_overflow).grid(
             row=3, column=2, columnspan=2, sticky="w", **pad)
-        ttk.Label(f_part, text="演示任务 30 秒后自动绿闪收尾并停流; 键盘上看不到的文字身份见下方任务映射表",
+        ttk.Button(f_part, text="重新扫描当前任务", command=self._rescan).grid(
+            row=3, column=4, columnspan=2, sticky="w", **pad)
+        ttk.Label(f_part, text="演示任务 30 秒后自动绿闪收尾并停流; 测试后点\"重新扫描\"可从 hook 历史恢复真实在跑的任务; 键盘上看不到的文字身份见下方任务映射表",
                   foreground="#8a6d3b").grid(row=4, column=0, columnspan=6, sticky="w", **pad)
 
         # ---- 服务 ----
@@ -448,6 +471,12 @@ class SettingsWindow:
 
     def _demo_overflow(self):
         self.app.svc.inject_demo(overflow=True, secs=30)
+
+    def _rescan(self):
+        """重新抓取当前任务状态: 重读 hook 事件历史重建任务表
+        (演示/清空后恢复真实在跑的会话, 不用等下一条 hook 事件)"""
+        n = self.app.svc.rescan_sessions()
+        self.v_status.set("已重新扫描: %d 条事件已重放" % n)
 
     def _restore(self):
         self.app.svc.clear_sessions()

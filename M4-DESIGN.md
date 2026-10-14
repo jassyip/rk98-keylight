@@ -238,7 +238,7 @@ notify = ["<python.exe>", "<rk98-keylight>/src/codex_notify.py"]
 
 ### E3 Codex 环境 — **通过（情报见 5.2）**
 
-- codex-cli 已安装（桌面版，版本 0.162.x），用户在活跃使用（最新 rollout 为 10-13）；
+- codex-cli 已安装（桌面版，rollout 会话记录在用户目录 ~/.codex/sessions），用户在活跃使用；
 - 事件词汇表实测聚合（12 文件）：`session_meta` / `event_msg/{task_started, item_completed, task_complete, turn_aborted, token_count, thread_settings_applied}` / `response_item/{message, reasoning, function_call, custom_tool_call...}` / `turn_context` / `token_usage_record` / `world_state`；
 - `item_completed` 的 `item.type` 实测：Reasoning / CommandExecution / AgentMessage / UserMessage / McpToolCall / Extension；
 - **无审批事件、无 plan 事件、notify 被占用、无 .zst 压缩**——四项能力按实测裁剪（详见 5.2）。
@@ -271,3 +271,45 @@ notify = ["<python.exe>", "<rk98-keylight>/src/codex_notify.py"]
 - 演示溢出（10 任务）：6 上排 + Codex 溢 3 / WB 溢 2，颗数与优先级符合设计；
 - 精确停流证明：清除任务后 frames 冻结（A=B=789，state=IDLE，tasks=0）；
 - Codex 尾随线程启动正常，旧文件正确识别为"只读尾部"；无真实 codex 活动时无信号（设计原则）。
+
+## 十一、线上迭代记录（2026-10-14 11:00–11:50，用户报障驱动）
+
+### 11.1 修复：没有待确认状态却一直红闪（NOTICE 脉冲）
+
+**报障**：用户无待确认操作，第一个任务整排红闪不灭。
+
+**根因**：`_handle_partition` 把 `Notification` 映射为持久 `ASK`。但 WorkBuddy 的 Notification 在**每轮回答结束、空闲等输入时都会触发**，不是"需要拍板"；真正的待确认信号是 `PreToolUse(AskUserQuestion)`。分区模式下 ASK 只能被下一次工具调用或 Stop 清除，于是每轮结束都红闪直到下一个事件。全局模式本来有 `notice_until` 20s 过期保护，分区改造时漏了这个语义。
+
+**修复**：`partition.py` 新增 `NOTICE` 瞬时脉冲信号（`wait_until` 截止，到期由 janitor 转 DONE 绿闪释放，默认 20s）；不打断持久 ASK；`tests/test_partition.py` 补 5 个脉冲用例（全生命周期/不被心跳误清/不打断 ASK/DONE 不受干预/到期转释放）。在线密集采样验证：T+2~19s 红闪 → T+23s 绿闪 → T+26s 释放；持久 ASK 26s 后仍在等、答复即恢复。
+
+### 11.2 新增：重新扫描当前任务（rescan v2）
+
+**需求**：用户测试灯效（演示/清空）后，没有选项重新抓取当前任务状态。
+
+**数据源决策（关键）**：第一版实现为重放 `hook-events.jsonl` 全量历史，在线实测 **restored=0**——该文件只旁路记录 `Stop`/`FinalStop`（126 条全是这两类，没有 UserPromptSubmit/PreToolUse 等建立事件，那些走 HTTP /event 直连），重放重建不出任务。改用 **WorkBuddy 会话记录** `<projects>/*/*.jsonl`：文件名 = session_id，文件 mtime = 最后活动时间；`projects` 根目录从 hook 事件的 `transcript_path` 字段推导（不硬编码个人路径，可用 `source.projects_root` 显式指定）。
+
+**语义**：mtime 在 `stale_session_secs`（600s）内 = 活跃会话 → 建任务；Stop/FinalStop 只表示"一轮回答结束"，不阻止恢复——用户点扫描就是要抓"当前还在的对话"；僵死会话不恢复。入口三处：托盘右键"重新扫描当前任务"、设置窗分区框内按钮、HTTP `action=RESCAN`。在线实测 restored=1（当前对话）。
+
+### 11.3 新增：分区/全局双模式切换入口
+
+设置窗原有"启用分区模式"开关之外，托盘右键加动态菜单项"切换: 分区(每排一任务) → 全局"（文字随当前模式变化），HTTP `action=TOGGLE_PARTITION` 同步支持。切换即清空当前模式状态、按新模式自动重扫历史恢复真实任务。在线实测：分区→全局（state 由 sessions 推导）→分区（任务自动恢复）全链路通过。
+
+### 11.4 修正：亮灯逻辑图示渲染错误（docs/lighting-logic.svg v2）
+
+用户截图报障 GitHub 上图显示有误。核对线上文件与本地字节一致后定位为 **SVG 自身布局缺陷**（非版本问题）：
+
+1. 排说明文字过长，与右侧 numpad 溢出区格子重叠（排1"（亮格 = 已完成步骤）"被 numpad 白格盖住）；
+2. numpad"WorkBuddy 溢出 →"用 `text-anchor="end"` 定位在格子右缘，文字向左延伸约 110px 压在第一列格子上；
+3. numpad 第 5 行 48px 宽格横跨 Codex/WB 两半边界，语义混乱。
+
+**v2 重画**：画布加宽至 1120（键盘区 x<880、numpad 区独立 x≥900）；numpad 按真实结构重画（左半 10 键 Codex / 右半 7 键 WB，示例 Codex 溢 3 / WB 溢 2）；半区标签入格、图例下移通栏；新增 ⑤ 双模式卡片与"重新扫描"信号入口。生成后用 headless Edge 截图做渲染级验证（无重叠、无出界）。
+
+### 11.5 台账补充
+
+| 项 | 状态 |
+| --- | --- |
+| NOTICE 脉冲修复 + 5 用例 | **已完成，21/21 通过** |
+| `rescan_sessions`（transcript 扫描）+ 12 用例 | **已完成，12/12 通过** |
+| `toggle_partition` 双模式 + 托盘/设置窗/HTTP 三入口 | **已完成** |
+| 图示 v2（修 3 处渲染错误 + 双模式/重扫描内容） | **已完成，渲染验证通过** |
+| `tests/test_rescan.py`（12 用例） | **已完成** |

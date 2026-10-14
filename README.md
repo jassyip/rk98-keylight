@@ -112,6 +112,16 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 
 设置界面状态栏有**任务映射表**（排号 / 来源 / 状态 / 进度 / 标签），键盘上看不见的身份在这里查。
 
+### 测试完灯效，怎么把当前任务抓回来？
+
+点完演示按钮或「恢复硬件灯效」之后，真实任务就暂时不在键盘上了。三个入口都能**重新扫描当前任务**（从 WorkBuddy 会话记录 `projects/*/*.jsonl` 恢复 10 分钟内有活动的会话，文件名即 session_id、文件时间即最后活动时间）：
+
+- 托盘右键「**重新扫描当前任务**」
+- 设置界面「分区模式」框内的「重新扫描当前任务」按钮
+- HTTP：`POST /test {"action":"RESCAN"}`（返回 `{"restored": N}`）
+
+**分区 / 全局双模式随时切换**：托盘右键菜单「切换: 分区(每排一任务) → 全局」（菜单文字随当前模式变化），或设置界面的总开关，或 `POST /test {"action":"TOGGLE_PARTITION"}`。切换后自动按新模式重扫历史，真实任务直接上新模式的键盘显示。
+
 ### 想用回「全键盘一个状态」的老模式？
 
 设置界面关掉「分区模式」总开关（或 `config.json` 里 `partition.enabled=false`），行为退回：
@@ -181,6 +191,8 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 | `service.stale_session_secs` | `600` | 会话多久没心跳算僵死 |
 | `service.notice_secs` | `20` | 通知类等待信号的有效期 |
 | `source.tail_hook_events` | `false` | 是否额外尾随外部事件文件 |
+| `source.hook_events_path` | `""` | 外部事件文件路径（尾随开启时填） |
+| `source.projects_root` | `""` | 重新扫描的会话记录根目录（留空 = 从 hook 事件的 transcript_path 自动推导） |
 
 > 实测帧率约 12fps（受 USB Feature 报表往返限制，非配置问题），流水/闪烁观感不受影响。
 
@@ -202,6 +214,10 @@ curl -X POST http://127.0.0.1:18990/test -d "{\"state\":\"UI\"}"       :: 弹出
 :: 分区演示（不依赖真实 agent；托盘设置窗也有同名按钮）
 curl -X POST http://127.0.0.1:18990/test -d "{\"action\":\"DEMO\"}"          :: 3 个假任务跑一轮
 curl -X POST http://127.0.0.1:18990/test -d "{\"action\":\"DEMO_OVERFLOW\"}"  :: 10 个任务看溢出区
+
+:: 重新扫描当前任务 / 切换分区-全局双模式
+curl -X POST http://127.0.0.1:18990/test -d "{\"action\":\"RESCAN\"}"            :: 恢复真实在跑的任务
+curl -X POST http://127.0.0.1:18990/test -d "{\"action\":\"TOGGLE_PARTITION\"}"  :: 分区/全局互切
 
 :: 单次状态试跑（不常驻）
 python src\keylight.py test --state RUNNING --secs 6
@@ -237,7 +253,7 @@ rk98-keylight/
 │   ├── install_hooks.py hook 注册/卸载
 │   ├── verify_m1.py     物理验证脚本
 │   └── diag_*.py        HID 能力诊断脚本
-├── tests/               离线单元测试（无需键盘，21 用例）
+├── tests/               离线单元测试（无需键盘，33 用例：分区/尾随/重扫描）
 └── probes/              hw_probe.py（协议能力探针）
 ```
 

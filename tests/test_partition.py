@@ -224,5 +224,58 @@ class TestFrameComposition(unittest.TestCase):
         self.assertEqual(m.tasks, {})                       # 直接释放, 无绿闪
 
 
+class TestTransientNotice(unittest.TestCase):
+    """Notification 脉冲: 回合结束提示 != 待确认, 不得变成"一直红闪"
+    (2026-10-14 用户报障 bug: Notification 曾被映射为持久 ASK)"""
+
+    def test_pulse_then_done_then_release(self):
+        m = mgr()
+        m.signal("workbuddy", "a", "START")
+        m.signal("workbuddy", "a", "NOTICE")
+        t = m.tasks["a"]
+        self.assertEqual(t.state, "WAITING")
+        self.assertGreater(t.wait_until, time.time())       # 有截止 = 瞬时
+        # 截止前 janitor 不动作(脉冲期间持续红闪)
+        self.assertFalse(m.janitor(now=t.wait_until - 0.5))
+        self.assertEqual(m.tasks["a"].state, "WAITING")
+        # 截止 -> DONE(绿闪), 再到期 -> 释放
+        self.assertTrue(m.janitor(now=t.wait_until + 0.1))
+        self.assertEqual(m.tasks["a"].state, "DONE")
+        self.assertTrue(m.janitor(now=t.done_until + 0.1))
+        self.assertNotIn("a", m.tasks)
+
+    def test_heartbeat_clears_pulse(self):
+        m = mgr()
+        m.signal("workbuddy", "a", "START")
+        m.signal("workbuddy", "a", "NOTICE")
+        m.signal("workbuddy", "a", "HEARTBEAT")             # 回合还在继续
+        t = m.tasks["a"]
+        self.assertEqual(t.state, "RUNNING")
+        self.assertEqual(t.wait_until, 0.0)
+        self.assertFalse(m.janitor(now=time.time() + 30))   # 不会被脉冲残留拖死
+
+    def test_notice_does_not_cut_ask_short(self):
+        m = mgr()
+        m.signal("workbuddy", "a", "ASK")                   # 持久等待(AskUserQuestion)
+        t = m.tasks["a"]
+        self.assertEqual((t.state, t.wait_until), ("WAITING", 0.0))
+        m.signal("workbuddy", "a", "NOTICE")                # 脉冲不得覆盖持久等待
+        self.assertEqual((t.state, t.wait_until), ("WAITING", 0.0))
+        self.assertFalse(m.janitor(now=time.time() + 30))   # 30s 后仍在等
+
+    def test_notice_on_done_ignored(self):
+        m = mgr()
+        m.signal("workbuddy", "a", "START")
+        m.signal("workbuddy", "a", "END")                   # -> DONE 绿闪中
+        m.signal("workbuddy", "a", "NOTICE")                # 不干预
+        self.assertEqual(m.tasks["a"].state, "DONE")
+        self.assertEqual(m.tasks["a"].wait_until, 0.0)
+
+    def test_notice_unknown_task_ignored(self):
+        m = mgr()
+        m.signal("workbuddy", "ghost", "NOTICE")            # 无此任务 -> 忽略
+        self.assertEqual(m.tasks, {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

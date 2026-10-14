@@ -13,10 +13,11 @@
 
 事件源:
   1. HTTP POST /event (hook.py 转发, install_hooks.py 注册)
-  2. 尾随 ~/.wb-switch/hook-events.jsonl (通道A, 按 (session,event,gen) 去重)
+  2. 尾随 hook 事件 JSONL 文件 (通道A, 路径见 config.json 的 source.hook_events_path, 按 (session,event,gen) 去重)
   3. 尾随 ~/.codex/sessions/**(Codex rollout JSONL, codex_tail.py)
 """
 import argparse
+import glob
 import json
 import logging
 import os
@@ -53,7 +54,8 @@ DEFAULTS = {
     "service": {"port": 18990, "stale_session_secs": 600, "final_grace_secs": 30,
                 "notice_secs": 20},
     "source": {"tail_hook_events": True,
-               "hook_events_path": ""},
+               "hook_events_path": "",   # 填你自己的 hook 事件文件路径
+               "projects_root": ""},
 }
 
 RUNNING_EVENTS = {"UserPromptSubmit"}
@@ -241,8 +243,10 @@ class Service:
 
         与全局模式的差异:
         - 每个 session 是独立任务(独占一排), 不再收敛成单一全局状态;
-        - 无 session_id 的 Notification 无法定位任务 -> 忽略(分区模式下等待
-          信号主要由 PreToolUse(AskUserQuestion) 驱动, 该事件带 sid, 可靠);
+        - 等待信号只由 PreToolUse(AskUserQuestion) 驱动 -> 持久 WAITING;
+          Notification(回合结束/空闲提示) -> NOTICE 短时红闪脉冲
+          (notice_secs, 到期自动转 DONE 绿闪释放, 不会一直红闪);
+          无 session_id 的 Notification 无法定位任务 -> 忽略;
         - TodoWrite 解析进度 -> 亮格填充(有总量才算真进度)。
         """
         mgr = self.mgr
@@ -251,8 +255,11 @@ class Service:
             mgr.signal("workbuddy", sid, "START",
                        {"label": str(payload.get("cwd") or "")})
         elif ev in WAITING_EVENTS:
+            # Notification = 回合结束/空闲提示, 不是"待确认" -> 短时脉冲,
+            # 到期自动转完成(2026-10-14 修复: 曾被误映射为持久 ASK,
+            # 导致没有待确认状态时该排一直红闪)
             if sid and sid != "unknown":
-                mgr.signal("workbuddy", sid, "ASK")
+                mgr.signal("workbuddy", sid, "NOTICE")
         elif ev in HEARTBEAT_EVENTS:
             tool = str(payload.get("tool_name") or "")
             if ev == "PreToolUse" and tool in ASK_TOOLS:
@@ -285,6 +292,99 @@ class Service:
         else:
             log.info("分区模式未启用, 忽略 %s 信号: %s %s", source,
                      str(task_id)[:8], kind)
+
+    # ---------- 重新扫描(状态重建) ----------
+    def rescan_sessions(self):
+        """重新抓取当前任务状态(托盘"重新扫描当前任务" / HTTP action=RESCAN)。
+
+        数据源: WorkBuddy 会话记录 <projects>/*/*.jsonl
+          - 文件名 = session_id, 文件 mtime = 会话最后活动时间;
+          - <projects> 根目录从 hook-events.jsonl 的 transcript_path 字段
+            推导(payload 自带, 不硬编码个人路径), 也可由
+            source.projects_root 显式指定。
+        为什么不是重放 hook-events.jsonl: 该文件只旁路记录 Stop/FinalStop,
+        没有 UserPromptSubmit/PreToolUse 等建立事件, 重放重建不出任务
+        (2026-10-14 第一版实现的实测结论)。
+
+        规则: 文件 mtime 在 stale_session_secs 内 = 活跃会话 -> 建任务;
+        Stop/FinalStop 只表示"一轮回答结束", 不阻止恢复 —— 用户点扫描
+        就是要抓"当前还在的对话"。返回恢复的会话数。"""
+        now = time.time()
+        stale = float(self.cfg["service"].get("stale_session_secs", 600))
+        src = self.cfg.get("source", {}) or {}
+        root = src.get("projects_root")
+        labels = {}
+        hpath = src.get("hook_events_path")
+        if hpath and os.path.exists(hpath):
+            try:
+                with open(hpath, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        tp = d.get("transcript_path")
+                        if not root and tp:
+                            # .../projects/<proj>/<sid>.jsonl -> .../projects
+                            root = os.path.dirname(os.path.dirname(str(tp)))
+                        sid = str(d.get("session_id") or "")
+                        cwd = str(d.get("cwd") or "")
+                        if sid and cwd and sid not in labels:
+                            labels[sid] = cwd
+            except OSError as e:
+                log.warning("重新扫描: 读取 hook 事件失败 %s", e)
+        found = []                          # (sid, label, mtime)
+        if root and os.path.isdir(root):
+            for p in glob.glob(os.path.join(root, "*", "*.jsonl")):
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if now - mt > stale:
+                    continue                 # 僵死/历史会话不恢复
+                sid = os.path.splitext(os.path.basename(p))[0]
+                found.append((sid, labels.get(sid)
+                              or os.path.basename(os.path.dirname(p)), mt))
+        with self.lock:
+            if self.partition_on and self.mgr is not None:
+                self.mgr.tasks.clear()
+                for sid, label, mt in found:
+                    self.mgr.replay("workbuddy", sid, "START",
+                                    {"label": label}, ts=mt)
+                self._sync_global_state()
+            else:
+                self.sessions = {sid: mt for sid, _, mt in found}
+                self.waiting.clear()
+                self.notice_until = 0.0
+                self._recompute()
+            write_status(self)
+        log.info("重新扫描完成: %d 个活跃会话恢复 (root=%s)", len(found), root)
+        return len(found)
+
+    def toggle_partition(self):
+        """分区/全局双模式切换(托盘快捷入口; 设置界面开关同步同一配置)。
+        切换后立即按新模式重扫历史, 真实任务直接上新模式的键盘显示。"""
+        with self.lock:
+            p = self.cfg.setdefault("partition", {})
+            p["enabled"] = not bool(p.get("enabled", True))
+            self.partition_on = bool(p["enabled"])
+            self.sessions.clear()
+            self.waiting.clear()
+            self.notice_until = 0.0
+            if self.partition_on:
+                if self.mgr is None:
+                    self.mgr = PartitionManager(self.cfg)
+            else:
+                if self.mgr is not None:
+                    self.mgr.clear_all()
+                self.mgr = None
+            self.paused = False
+            self._set_state("IDLE")
+        log.info("已切换为%s模式", "分区(每排一任务)" if self.partition_on else "全局(单状态)")
+        return self.partition_on
 
     def _sync_global_state(self):
         """分区模式: 由任务表推导全局态(托盘图标/状态栏)"""
@@ -643,6 +743,19 @@ class Handler(BaseHTTPRequestHandler):
                     overflow=True, secs=min(120, max(3, float(payload.get("secs", 30)))))
                 log.info("演示溢出已启动")
                 self._reply(b'{"ok":true}')
+                return
+            if action == "RESCAN":
+                # 重新扫描会话记录, 重建当前任务/会话状态
+                n = self.service.rescan_sessions()
+                self._reply(json.dumps(
+                    {"ok": True, "restored": n}).encode("utf-8"))
+                return
+            if action == "TOGGLE_PARTITION":
+                # 分区/全局双模式切换
+                on = self.service.toggle_partition()
+                self.service.rescan_sessions()
+                self._reply(json.dumps(
+                    {"ok": True, "partition": on}).encode("utf-8"))
                 return
             state = str(payload.get("state") or "RUNNING").upper()
             if state == "IDLE":

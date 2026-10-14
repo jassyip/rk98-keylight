@@ -41,7 +41,7 @@ PRIO = {"WAITING": 3, "FAIL": 2, "DONE": 1, "RUNNING": 0}
 class TaskRec:
     __slots__ = ("source", "task_id", "slot", "state", "progress", "steps",
                  "label", "last_seen", "done_since", "done_until",
-                 "fail_until", "demo_until")
+                 "fail_until", "wait_until", "demo_until")
 
     def __init__(self, source, task_id, slot, label, now, state="RUNNING"):
         self.source = source
@@ -55,6 +55,7 @@ class TaskRec:
         self.done_since = 0.0       # DONE 绿闪相位基准
         self.done_until = 0.0       # DONE 播放截止(到期由 janitor 释放)
         self.fail_until = 0.0       # FAIL 红闪截止
+        self.wait_until = 0.0       # 瞬时 WAITING(Notification 脉冲)截止; 0 = 持久(ASK)
         self.demo_until = 0.0       # 演示任务到期时刻(0 = 非演示)
 
 
@@ -79,6 +80,23 @@ class PartitionManager:
                     self.tasks.pop(task_id, None)
                 return
 
+            if kind == "NOTICE":
+                # Notification(回合结束/空闲等你输入) != "待确认"。
+                # 只给一个短时红闪脉冲(notice_secs), 到期由 janitor 转 DONE
+                # 绿闪释放 —— 修复"没有待确认状态却一直红闪"的 bug
+                # (2026-10-14 用户报障: Notification 曾被映射成持久 ASK)。
+                # 不覆盖持久 ASK 等待; DONE/FAIL 不干预。
+                if t is None:
+                    return
+                if t.state == "WAITING" and not t.wait_until:
+                    return                      # 正在持久等你拍板, 不打断
+                if t.state not in ("RUNNING", "WAITING"):
+                    return
+                secs = float(self.cfg.get("service", {}).get("notice_secs", 20))
+                t.state = "WAITING"
+                t.wait_until = now + max(1.0, secs)
+                return
+
             if kind in ("START", "HEARTBEAT", "ASK"):
                 if t is None:
                     t = self._create(source, task_id, now,
@@ -89,10 +107,12 @@ class PartitionManager:
                     t.source = source
                     if kind == "ASK":
                         t.state = "WAITING"
+                        t.wait_until = 0.0        # ASK = 持久等待, 无截止
                     elif t.state in ("WAITING", "DONE"):
                         # 新提交/普通工具调用 = 提问已被答复 / 重新开工
                         t.state = "RUNNING"
                         t.done_since = t.done_until = 0.0
+                        t.wait_until = 0.0
                 if kind == "HEARTBEAT":
                     t.steps += max(1, int(extra.get("steps_delta", 1)))
                 if extra.get("progress"):
@@ -118,6 +138,7 @@ class PartitionManager:
             if kind == "ANSWER":
                 if t is not None and t.state == "WAITING":
                     t.state = "RUNNING"
+                    t.wait_until = 0.0
                     t.last_seen = now
                 return
 
@@ -136,6 +157,67 @@ class PartitionManager:
                 return
 
             log.warning("未知信号 kind=%r (source=%s task=%s)", kind, source, task_id)
+
+    def replay(self, source, task_id, kind, extra=None, ts=None):
+        """重放历史事件(重新扫描/状态重建用)。
+
+        与 signal() 的差异:
+        - last_seen 用历史时间戳 ts(保留活性判断, 僵死清理才准);
+        - END/CLOSE 直接移除任务, 不触发 DONE 绿闪 —— 重放是状态重建,
+          不应该有灯光演出(用户报障后补的功能: 2026-10-14)。
+        """
+        extra = extra or {}
+        ts = time.time() if ts is None else ts
+        with self.lock:
+            t = self.tasks.get(task_id)
+
+            if kind == "CLOSE":
+                self.tasks.pop(task_id, None)
+                return
+
+            if kind == "END":
+                # 重放中的"已收工" = 该会话结束, 直接移除(不闪绿)
+                self.tasks.pop(task_id, None)
+                return
+
+            if kind in ("START", "HEARTBEAT", "ASK"):
+                if t is None:
+                    t = self._create(source, task_id, ts,
+                                     label=str(extra.get("label") or ""),
+                                     state="WAITING" if kind == "ASK" else "RUNNING")
+                else:
+                    t.last_seen = ts
+                    t.source = source
+                    if kind == "ASK":
+                        t.state = "WAITING"
+                        t.wait_until = 0.0
+                    elif t.state in ("WAITING", "DONE"):
+                        t.state = "RUNNING"
+                        t.done_since = t.done_until = 0.0
+                        t.wait_until = 0.0
+                if kind == "HEARTBEAT":
+                    t.steps += max(1, int(extra.get("steps_delta", 1)))
+                if extra.get("progress"):
+                    try:
+                        t.progress = (int(extra["progress"][0]),
+                                      int(extra["progress"][1]))
+                    except (TypeError, ValueError, IndexError):
+                        pass
+                if extra.get("label") and not t.label:
+                    t.label = str(extra["label"])
+                return
+
+            if kind == "PLAN":
+                if t is not None and extra.get("progress"):
+                    try:
+                        t.progress = (int(extra["progress"][0]),
+                                      int(extra["progress"][1]))
+                        t.last_seen = ts
+                    except (TypeError, ValueError, IndexError):
+                        pass
+                return
+
+            # NOTICE(瞬时脉冲) 等其余 kind 在重放中无意义, 跳过
 
     def _create(self, source, task_id, now, label="", state="RUNNING"):
         """建任务并分配槽位: 取最小空闲槽; 无空闲槽则进溢出区(slot=None)"""
@@ -248,6 +330,13 @@ class PartitionManager:
             for tid, t in list(self.tasks.items()):
                 if t.demo_until and now > t.demo_until and t.state in ("RUNNING", "WAITING"):
                     self._start_done(t, now)      # 演示到期 -> 绿闪后自然释放
+                    changed = True
+                    continue
+                if (t.state == "WAITING" and t.wait_until
+                        and now >= t.wait_until):
+                    # Notification 脉冲到期且无后续事件 = 回合已结束
+                    # -> 转 DONE 绿闪后释放(不再一直红闪)
+                    self._start_done(t, now)
                     changed = True
                     continue
                 if t.state == "DONE" and now >= t.done_until:
