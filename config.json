@@ -8,14 +8,14 @@
     "mode": "rainbow",
     "color": "#FF0000",
     "fps": 30,
-    "brightness": 0.8,
+    "brightness": 100,
     "speed": 40
   },
   "waiting": {
     "mode": "flow",
     "color": "#FF0000",
     "fps": 30,
-    "brightness": 0.8,
+    "brightness": 100,
     "speed": 40
   },
   "done": {
@@ -35,8 +35,9 @@
     "waiting_off_ms": 100,
     "speed": 40,
     "fps": 30,
-    "brightness": 0.8,
-    "tail": 8
+    "brightness": 100,
+    "tail": 8,
+    "effect": "flow"
   },
   "sources": {
     "workbuddy": {

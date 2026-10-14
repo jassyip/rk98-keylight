@@ -31,7 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rk98 import RK98, RK98Error, kill_rk_app, rk_app_running  # noqa: E402
-from effects import hex_rgb, scale, solid_colors, flow_frame, rainbow_frame, breathe_frame  # noqa: E402
+from effects import (bfactor, hex_rgb, scale, solid_colors, flow_frame,  # noqa: E402
+                     rainbow_frame, breathe_frame)
 from partition import PartitionManager  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,14 +42,15 @@ STATUS_FILE = os.path.join(ROOT, "status.json")
 
 DEFAULTS = {
     "device": {"vid": "258A", "pid": "00C1", "preferred_collection": "Col05"},
-    "running": {"mode": "rainbow", "color": "#FF0000", "fps": 30, "brightness": 0.8, "speed": 40},
+    "running": {"mode": "rainbow", "color": "#FF0000", "fps": 30, "brightness": 100, "speed": 40},
     "done": {"color": "#00FF00", "mode": "flash", "times": 3, "on_ms": 200, "off_ms": 120},
-    "waiting": {"mode": "flow", "color": "#FF0000", "fps": 30, "brightness": 0.8, "speed": 40},
+    "waiting": {"mode": "flow", "color": "#FF0000", "fps": 30, "brightness": 100, "speed": 40},
     "idle": {"mode": "hardware"},
     "conflict": {"close_rk_app": False},
     "partition": {"enabled": True, "fail_flash_secs": 30,
                   "waiting_on_ms": 150, "waiting_off_ms": 100,
-                  "speed": 40, "fps": 30, "brightness": 0.8, "tail": 8.0},
+                  "effect": "flow", "breathe_period": 2.0,
+                  "speed": 40, "fps": 30, "brightness": 100, "tail": 8.0},
     "sources": {"workbuddy": {"color": "#00E676"}, "codex": {"color": "#2979FF"}},
     "codex": {"enabled": True, "sessions_dir": "~/.codex/sessions", "poll_secs": 2},
     "service": {"port": 18990, "stale_session_secs": 600, "final_grace_secs": 30,
@@ -77,6 +79,19 @@ def deep_merge(base, override):
             base[k] = v
 
 
+def _migrate_brightness(cfg):
+    """亮度量表迁移(2026-10-14): 早期 0-1 浮点(0.8/1.0) -> 0-100 整数百分比。
+
+    判定: 0 < v <= 1 的浮点视为旧值, x100 取整; 新值(整数百分比)不动。
+    没有这段, 老配置 0.8 会被新代码当成 0.8% -> 键盘几乎全黑。
+    """
+    for sec in ("running", "waiting", "partition"):
+        b = cfg.get(sec, {}).get("brightness")
+        if isinstance(b, float) and 0.0 < b <= 1.0:
+            cfg[sec]["brightness"] = int(round(b * 100))
+    return cfg
+
+
 def load_config(path):
     cfg = json.loads(json.dumps(DEFAULTS))
     if path and os.path.exists(path):
@@ -85,7 +100,7 @@ def load_config(path):
                 deep_merge(cfg, json.load(f))
         except Exception as e:
             log.warning("配置读取失败, 使用默认值: %s", e)
-    return cfg
+    return _migrate_brightness(cfg)
 
 
 def write_status(svc):
@@ -601,7 +616,7 @@ class Renderer(threading.Thread):
 
     def render_running(self):
         svc, cfg = self.svc, self.svc.cfg["running"]
-        rgb = scale(hex_rgb(cfg["color"]), float(cfg.get("brightness", 1.0)))
+        rgb = scale(hex_rgb(cfg["color"]), bfactor(cfg.get("brightness", 100)))
         fps = max(float(cfg.get("fps", 30)), 1)
         interval = 1.0 / fps
         speed = float(cfg.get("speed", 40))
@@ -652,7 +667,7 @@ class Renderer(threading.Thread):
 
     def render_waiting(self):
         svc, cfg = self.svc, self.svc.cfg["waiting"]
-        rgb = scale(hex_rgb(cfg["color"]), float(cfg.get("brightness", 1.0)))
+        rgb = scale(hex_rgb(cfg["color"]), bfactor(cfg.get("brightness", 100)))
         fps = max(float(cfg.get("fps", 30)), 1)
         interval = 1.0 / fps
         speed = float(cfg.get("speed", 40))

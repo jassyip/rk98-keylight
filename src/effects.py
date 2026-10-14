@@ -15,6 +15,18 @@ def scale(rgb, k):
     return tuple(max(0, min(255, int(round(c * k)))) for c in rgb)
 
 
+def bfactor(v, default=100):
+    """亮度配置(0-100 百分比) -> 缩放系数(0-1)。
+
+    2026-10-14 起亮度统一用百分比量表(默认 100 = 全亮), 替代早期的
+    0-1 浮点(0.8 这种写法用户面板上不直观)。非法值回落 default。
+    """
+    try:
+        return max(0.0, min(1.0, float(v) / 100.0))
+    except (TypeError, ValueError):
+        return default / 100.0
+
+
 def solid_colors(rgb):
     return [rgb] * 100
 
@@ -94,3 +106,18 @@ def lit_row_flow_map(keys, rgb, phase, tail=8.0, lit_count=None):
     lit = set(ordered[:lit_count])
     base = row_flow_map(keys, rgb, phase, tail)
     return {i: (c if i in lit else (0, 0, 0)) for i, c in base.items()}
+
+
+def row_breathe_map(keys, rgb, t, period=2.0, lit_count=None):
+    """排内呼吸: 亮格(或整排)亮度正弦起伏; 返回 {key: color}, 暗键不出现。
+
+    与流水的区别: 没有波前, 整排(亮区)同步渐明渐暗。rgb 传入前应已按
+    亮度配置缩放, 这里只乘呼吸包络。lit_count 语义同 lit_row_flow_map。
+    """
+    k = 0.5 - 0.5 * math.cos(2 * math.pi * (t % period) / period)
+    c = scale(rgb, k)
+    if lit_count is None or lit_count >= len(keys):
+        return {i: c for i in keys}
+    lit_count = max(0, min(len(keys), int(lit_count)))
+    ordered = sorted(keys, key=lambda i: VPOSITIONS[i][0])
+    return {i: c for i in ordered[:lit_count]}

@@ -41,6 +41,9 @@ TRAY_SCRIPT = os.path.abspath(__file__)
 
 MODE_LABELS = {"rainbow": "彩色流水", "flow": "单色流水", "breathe": "呼吸"}
 LABEL_MODES = {v: k for k, v in MODE_LABELS.items()}
+# 分区模式运行效果: 颜色=来源已定, 只有动画模式可选(流水/呼吸)
+PART_EFFECT_LABELS = {"flow": "流水", "breathe": "呼吸"}
+PART_LABEL_EFFECTS = {v: k for k, v in PART_EFFECT_LABELS.items()}
 
 STATE_TEXT = {
     "IDLE": "平常 · 键盘自带灯效",
@@ -293,8 +296,16 @@ class SettingsWindow:
         pad = {"padx": 8, "pady": 4}
         row = 0
 
-        # ---- 运行中 ----
-        f_run = ttk.LabelFrame(self.win, text="运行中（WorkBuddy 干活时）")
+        # ---- 模式互斥提示(分区/全局二选一, 当前哪套生效) ----
+        self.v_mode_hint = tk.StringVar(value="…")
+        ttk.Label(self.win, textvariable=self.v_mode_hint,
+                  foreground="#8a6d3b").grid(
+            row=row, column=0, columnspan=3, sticky="w", **pad)
+        row += 1
+
+        # ---- 运行中(仅全局模式; 分区模式启用时置灰) ----
+        f_run = ttk.LabelFrame(self.win, text="运行中（WorkBuddy 干活时）· 仅全局模式")
+        self.f_run = f_run
         f_run.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
         row += 1
         ttk.Label(f_run, text="效果:").grid(row=0, column=0, sticky="e", **pad)
@@ -308,10 +319,10 @@ class SettingsWindow:
                    command=lambda: self._pick(self.v_run_color)).grid(row=0, column=4, **pad)
         self._slider(f_run, 1, "速度", cfg["running"].get("speed", 40), 5, 120, "v_run_speed")
         self._slider(f_run, 2, "帧率", cfg["running"].get("fps", 30), 10, 60, "v_run_fps")
-        self._slider(f_run, 3, "亮度", cfg["running"].get("brightness", 0.8), 0.1, 1.0, "v_run_bri", res=0.05)
+        self._slider(f_run, 3, "亮度", cfg["running"].get("brightness", 100), 5, 100, "v_run_bri")
 
-        # ---- 待确认 ----
-        f_wait = ttk.LabelFrame(self.win, text="待确认（需要你拍板时 · 红灯流水）")
+        # ---- 待确认(颜色/亮度两种模式共用: 分区红闪也用这俩) ----
+        f_wait = ttk.LabelFrame(self.win, text="待确认（需要你拍板时 · 红灯流水）· 颜色/亮度两模式共用")
         f_wait.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
         row += 1
         ttk.Label(f_wait, text="颜色:").grid(row=0, column=0, sticky="e", **pad)
@@ -321,9 +332,10 @@ class SettingsWindow:
                    command=lambda: self._pick(self.v_wait_color)).grid(row=0, column=2, **pad)
         self._slider(f_wait, 1, "速度", cfg["waiting"].get("speed", 40), 5, 120, "v_wait_speed")
         self._slider(f_wait, 2, "帧率", cfg["waiting"].get("fps", 30), 10, 60, "v_wait_fps")
+        self._slider(f_wait, 3, "亮度", cfg["waiting"].get("brightness", 100), 5, 100, "v_wait_bri")
 
-        # ---- 完成 ----
-        f_done = ttk.LabelFrame(self.win, text="完成（一轮回答结束时 · 绿灯闪烁）")
+        # ---- 完成(闪灯参数两种模式共用) ----
+        f_done = ttk.LabelFrame(self.win, text="完成（一轮回答结束时 · 绿灯闪烁）· 两模式共用")
         f_done.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
         row += 1
         ttk.Label(f_done, text="颜色:").grid(row=0, column=0, sticky="e", **pad)
@@ -349,40 +361,57 @@ class SettingsWindow:
         self.v_part_on = tk.BooleanVar(
             value=bool(cfg.get("partition", {}).get("enabled", True)))
         ttk.Checkbutton(f_part, text="启用分区模式(每排一任务; 关闭则回到全局单状态灯效)",
-                        variable=self.v_part_on).grid(
-            row=0, column=0, columnspan=6, sticky="w", **pad)
-        ttk.Label(f_part, text="WorkBuddy 运行色:").grid(row=1, column=0, sticky="e", **pad)
+                        variable=self.v_part_on,
+                        command=self._sync_mode_ui).grid(
+            row=0, column=0, columnspan=8, sticky="w", **pad)
+        # 设置项全收进 body 子框: 互斥置灰时整框禁用, 复选框永远可点(能切回来)
+        part_body = ttk.Frame(f_part)
+        part_body.grid(row=1, column=0, columnspan=8, sticky="we", **pad)
+        self.part_body = part_body
+        ttk.Label(part_body, text="WorkBuddy 运行色:").grid(row=0, column=0, sticky="e", **pad)
         self.v_src_wb = tk.StringVar(
             value=cfg.get("sources", {}).get("workbuddy", {}).get("color", "#00E676"))
-        ttk.Entry(f_part, textvariable=self.v_src_wb, width=9).grid(row=1, column=1, **pad)
-        ttk.Button(f_part, text="…", width=3,
-                   command=lambda: self._pick(self.v_src_wb)).grid(row=1, column=2, **pad)
-        ttk.Label(f_part, text="Codex 运行色:").grid(row=1, column=3, sticky="e", **pad)
+        ttk.Entry(part_body, textvariable=self.v_src_wb, width=9).grid(row=0, column=1, **pad)
+        ttk.Button(part_body, text="…", width=3,
+                   command=lambda: self._pick(self.v_src_wb)).grid(row=0, column=2, **pad)
+        ttk.Label(part_body, text="Codex 运行色:").grid(row=0, column=3, sticky="e", **pad)
         self.v_src_cx = tk.StringVar(
             value=cfg.get("sources", {}).get("codex", {}).get("color", "#2979FF"))
-        ttk.Entry(f_part, textvariable=self.v_src_cx, width=9).grid(row=1, column=4, **pad)
-        ttk.Button(f_part, text="…", width=3,
-                   command=lambda: self._pick(self.v_src_cx)).grid(row=1, column=5, **pad)
-        ttk.Label(f_part, text="失败闪烁(秒):").grid(row=2, column=0, sticky="e", **pad)
+        ttk.Entry(part_body, textvariable=self.v_src_cx, width=9).grid(row=0, column=4, **pad)
+        ttk.Button(part_body, text="…", width=3,
+                   command=lambda: self._pick(self.v_src_cx)).grid(row=0, column=5, **pad)
+        ttk.Label(part_body, text="失败闪烁(秒):").grid(row=1, column=0, sticky="e", **pad)
         self.v_fail_secs = tk.IntVar(
             value=int(cfg.get("partition", {}).get("fail_flash_secs", 30)))
-        ttk.Spinbox(f_part, from_=5, to=120, width=5,
-                    textvariable=self.v_fail_secs).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(f_part, text="等待 亮/灭(ms):").grid(row=2, column=3, sticky="e", **pad)
+        ttk.Spinbox(part_body, from_=5, to=120, width=5,
+                    textvariable=self.v_fail_secs).grid(row=1, column=1, sticky="w", **pad)
+        ttk.Label(part_body, text="等待 亮/灭(ms):").grid(row=1, column=3, sticky="e", **pad)
         self.v_wait_on = tk.IntVar(
             value=int(cfg.get("partition", {}).get("waiting_on_ms", 150)))
         self.v_wait_off = tk.IntVar(
             value=int(cfg.get("partition", {}).get("waiting_off_ms", 100)))
-        ttk.Entry(f_part, textvariable=self.v_wait_on, width=5).grid(row=2, column=4, **pad)
-        ttk.Entry(f_part, textvariable=self.v_wait_off, width=5).grid(row=2, column=5, **pad)
-        ttk.Button(f_part, text="演示分区(3 任务)", command=self._demo).grid(
-            row=3, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(f_part, text="演示溢出(10 任务)", command=self._demo_overflow).grid(
-            row=3, column=2, columnspan=2, sticky="w", **pad)
-        ttk.Button(f_part, text="重新扫描当前任务", command=self._rescan).grid(
-            row=3, column=4, columnspan=2, sticky="w", **pad)
-        ttk.Label(f_part, text="演示任务 30 秒后自动绿闪收尾并停流; 测试后点\"重新扫描\"可从 hook 历史恢复真实在跑的任务; 键盘上看不到的文字身份见下方任务映射表",
-                  foreground="#8a6d3b").grid(row=4, column=0, columnspan=6, sticky="w", **pad)
+        ttk.Entry(part_body, textvariable=self.v_wait_on, width=5).grid(row=1, column=4, **pad)
+        ttk.Entry(part_body, textvariable=self.v_wait_off, width=5).grid(row=1, column=5, **pad)
+        # 效果/速度/帧率/亮度 — 与全局"运行中"同规格(2026-10-14 用户要求)
+        pcfg0 = cfg.get("partition", {})
+        ttk.Label(part_body, text="效果:").grid(row=2, column=0, sticky="e", **pad)
+        self.v_part_effect = tk.StringVar(
+            value=PART_EFFECT_LABELS.get(pcfg0.get("effect", "flow"), "流水"))
+        ttk.Combobox(part_body, textvariable=self.v_part_effect, state="readonly",
+                     width=8, values=list(PART_EFFECT_LABELS.values())).grid(
+            row=2, column=1, sticky="w", **pad)
+        self._cslider(part_body, 2, 2, "速度", pcfg0.get("speed", 40), 5, 120, "v_part_speed")
+        self._cslider(part_body, 3, 0, "帧率", pcfg0.get("fps", 30), 10, 60, "v_part_fps")
+        self._cslider(part_body, 3, 3, "亮度", pcfg0.get("brightness", 100), 5, 100, "v_part_bri")
+        ttk.Button(part_body, text="演示分区(3 任务)", width=15, command=self._demo).grid(
+            row=4, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Button(part_body, text="演示溢出(10 任务)", width=15, command=self._demo_overflow).grid(
+            row=4, column=2, columnspan=2, sticky="w", **pad)
+        ttk.Button(part_body, text="重新扫描当前任务", width=15, command=self._rescan).grid(
+            row=4, column=4, columnspan=2, sticky="w", **pad)
+        ttk.Label(part_body, text="演示任务 30 秒后自动绿闪收尾并停流; 测试后点\"重新扫描\"可从 hook 历史恢复真实在跑的任务; 键盘上看不到的文字身份见下方任务映射表",
+                  foreground="#8a6d3b").grid(row=5, column=0, columnspan=8, sticky="w", **pad)
+        self._sync_mode_ui()
 
         # ---- 服务 ----
         f_svc = ttk.LabelFrame(self.win, text="服务")
@@ -415,18 +444,26 @@ class SettingsWindow:
             self.task_tree.column(c, width=w, anchor="w")
         self.task_tree.grid(row=0, column=0, columnspan=6, sticky="we", **pad)
 
-        # ---- 按钮 ----
+        # ---- 按钮(两行分组: 上=保存/确认/恢复, 下=三个测试) ----
         f_btn = ttk.Frame(self.win)
         f_btn.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
         row += 1
-        ttk.Button(f_btn, text="保存并应用", command=self.save).pack(side=tk.LEFT, **pad)
-        ttk.Button(f_btn, text="测试: 运行中",
+        btn1 = ttk.Frame(f_btn)
+        btn1.pack(fill=tk.X)
+        ttk.Button(btn1, text="保存并应用", width=12, command=self.save).pack(
+            side=tk.LEFT, **pad)
+        ttk.Button(btn1, text="确认并关闭", width=12, command=self._ok).pack(
+            side=tk.LEFT, **pad)
+        ttk.Button(btn1, text="恢复硬件灯效", command=self._restore).pack(
+            side=tk.LEFT, **pad)
+        btn2 = ttk.Frame(f_btn)
+        btn2.pack(fill=tk.X)
+        ttk.Button(btn2, text="测试: 运行中", width=12,
                    command=lambda: self._test("RUNNING")).pack(side=tk.LEFT, **pad)
-        ttk.Button(f_btn, text="测试: 待确认",
+        ttk.Button(btn2, text="测试: 待确认", width=12,
                    command=lambda: self._test("WAITING")).pack(side=tk.LEFT, **pad)
-        ttk.Button(f_btn, text="测试: 完成",
+        ttk.Button(btn2, text="测试: 完成", width=12,
                    command=lambda: self._test("DONE")).pack(side=tk.LEFT, **pad)
-        ttk.Button(f_btn, text="恢复硬件灯效", command=self._restore).pack(side=tk.LEFT, **pad)
 
         # ---- 状态栏 ----
         self.v_status = tk.StringVar(value="…")
@@ -440,13 +477,16 @@ class SettingsWindow:
     # ---------- 控件辅助 ----------
     def _slider(self, parent, r, label, value, lo, hi, attr, res=None):
         ttk.Label(parent, text=label + ":").grid(row=r, column=0, sticky="e", padx=8, pady=2)
-        var = tk.DoubleVar(value=float(value))
+        if res:                              # 浮点步进(旧亮度 0.05 用, 现保留能力)
+            var = tk.DoubleVar(value=float(value))
+        else:
+            var = tk.IntVar(value=int(value))
         kw = {"from_": lo, "to": hi, "orient": tk.HORIZONTAL, "length": 150,
               "variable": var}
         if res:
             kw["resolution"] = res
             kw["digits"] = 2
-        # 注意: ttk.Scale 不支持 resolution(亮度需要 0.05 步长), 故用 tk.Scale
+        # 注意: ttk.Scale 不支持 resolution, 故用 tk.Scale
         s = tk.Scale(parent, showvalue=False, **kw)
         s.grid(row=r, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         lbl = ttk.Label(parent, text=("%.2f" % float(value)) if res else str(int(value)), width=5)
@@ -454,6 +494,43 @@ class SettingsWindow:
         s.configure(command=lambda _v, l=lbl, rs=res: l.configure(
             text=("%.2f" % float(_v)) if rs else str(int(float(_v)))))
         setattr(self, attr, var)
+
+    def _cslider(self, parent, r, c, label, value, lo, hi, attr):
+        """紧凑整数滑条(分区模式一行多控件用): 标签@c, 滑条@c+1, 数值@c+2"""
+        ttk.Label(parent, text=label + ":").grid(row=r, column=c, sticky="e", padx=8, pady=2)
+        var = tk.IntVar(value=int(value))
+        s = tk.Scale(parent, from_=lo, to=hi, orient=tk.HORIZONTAL, length=105,
+                     showvalue=False, variable=var)
+        s.grid(row=r, column=c + 1, sticky="w", padx=4, pady=2)
+        lbl = ttk.Label(parent, text=str(int(value)), width=4)
+        lbl.grid(row=r, column=c + 2, sticky="w")
+        s.configure(command=lambda _v, l=lbl: l.configure(text=str(int(float(_v)))))
+        setattr(self, attr, var)
+
+    # ---------- 模式互斥(分区/全局二选一) ----------
+    def _set_enabled(self, widget, on):
+        """递归启用/禁用框架内所有控件(ttk/tk 混用, 逐个 try)"""
+        try:
+            widget.configure(state=tk.NORMAL if on else tk.DISABLED)
+        except tk.TclError:
+            pass
+        for ch in widget.winfo_children():
+            self._set_enabled(ch, on)
+
+    def _sync_mode_ui(self, *_a):
+        """分区开关 <-> 两套效果区的互斥置灰 + 顶部提示文字。
+        注意: 待确认颜色/亮度、完成闪灯参数两种模式共用, 不置灰。"""
+        on = bool(self.v_part_on.get())
+        self._set_enabled(self.f_run, not on)        # 运行中: 全局专属
+        self._set_enabled(self.part_body, on)        # 分区设置项(复选框在框外, 永远可点)
+        if on:
+            self.v_mode_hint.set(
+                "当前生效: 分区模式 — \"运行中\"为全局模式专用, 已停用; "
+                "待确认颜色/亮度与完成闪灯为共用参数仍可调")
+        else:
+            self.v_mode_hint.set(
+                "当前生效: 全局模式 — 分区效果设置已停用; "
+                "勾选\"启用分区模式\"可切回每排一任务")
 
     def _pick(self, var):
         _, hx = colorchooser.askcolor(color=var.get() or "#FF0000",
@@ -480,6 +557,12 @@ class SettingsWindow:
 
     def _restore(self):
         self.app.svc.clear_sessions()
+
+    def _ok(self):
+        """确认: 保存并应用, 然后关闭窗口"""
+        self.save(quiet=True)
+        if self.win.winfo_exists():
+            self._hide()
 
     def _hide(self):
         self.win.withdraw()
@@ -527,7 +610,7 @@ class SettingsWindow:
                 self.TASK_STATE_TEXT.get(t["state"], t["state"]),
                 prog, t.get("label", "")))
 
-    def save(self):
+    def save(self, quiet=False):
         try:
             cfg = {
                 "running": {
@@ -535,14 +618,14 @@ class SettingsWindow:
                     "color": self._norm_color(self.v_run_color.get()),
                     "speed": int(self.v_run_speed.get()),
                     "fps": int(self.v_run_fps.get()),
-                    "brightness": round(float(self.v_run_bri.get()), 2),
+                    "brightness": int(self.v_run_bri.get()),
                 },
                 "waiting": {
                     "mode": "flow",
                     "color": self._norm_color(self.v_wait_color.get()),
                     "speed": int(self.v_wait_speed.get()),
                     "fps": int(self.v_wait_fps.get()),
-                    "brightness": 0.8,
+                    "brightness": int(self.v_wait_bri.get()),
                 },
                 "done": {
                     "mode": "flash",
@@ -554,9 +637,13 @@ class SettingsWindow:
                 "conflict": {"close_rk_app": bool(self.v_close_rk.get())},
                 "partition": {
                     "enabled": bool(self.v_part_on.get()),
+                    "effect": PART_LABEL_EFFECTS.get(self.v_part_effect.get(), "flow"),
                     "fail_flash_secs": int(self.v_fail_secs.get()),
                     "waiting_on_ms": int(self.v_wait_on.get()),
                     "waiting_off_ms": int(self.v_wait_off.get()),
+                    "speed": int(self.v_part_speed.get()),
+                    "fps": int(self.v_part_fps.get()),
+                    "brightness": int(self.v_part_bri.get()),
                 },
                 "sources": {
                     "workbuddy": {"color": self._norm_color(self.v_src_wb.get())},
@@ -587,7 +674,8 @@ class SettingsWindow:
         except OSError as e:
             messagebox.showwarning("自启设置失败", str(e), parent=self.win)
 
-        messagebox.showinfo("已保存", "配置已保存并热生效(无需重启)", parent=self.win)
+        if not quiet:
+            messagebox.showinfo("已保存", "配置已保存并热生效(无需重启)", parent=self.win)
 
     @staticmethod
     def _norm_color(s):

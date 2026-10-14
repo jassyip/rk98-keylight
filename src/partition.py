@@ -15,7 +15,8 @@ import logging
 import threading
 import time
 
-from effects import hex_rgb, lit_row_flow_map, row_phase, scale
+from effects import (bfactor, hex_rgb, lit_row_flow_map, row_breathe_map,  # noqa: E402
+                     row_phase, scale)
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS
 
 log = logging.getLogger("keylight")
@@ -280,7 +281,7 @@ class PartitionManager:
             # 红闪: 整排同相位(绝对时间相位天然同步所有等待排)
             w = self.cfg.get("waiting", {})
             rgb = scale(hex_rgb(w.get("color", "#FF0000")),
-                        float(w.get("brightness", 0.8)))
+                        bfactor(w.get("brightness", 100)))
             on_ms = max(1.0, float(pcfg.get("waiting_on_ms", 150)))
             off_ms = max(1.0, float(pcfg.get("waiting_off_ms", 100)))
             if (now * 1000.0) % (on_ms + off_ms) < on_ms:
@@ -304,18 +305,23 @@ class PartitionManager:
                     colors[i] = rgb
             return
 
-        # RUNNING: 来源色排内流水(有进度则只亮已完成的格)
+        # RUNNING: 来源色排内动画(有进度则只亮已完成的格)
+        # effect=flow 流水(波前扫描) / breathe 呼吸(整排渐明渐暗), 面板可切
         src = self.cfg.get("sources", {}).get(t.source, {})
         rgb = scale(hex_rgb(src.get("color", SOURCE_COLORS.get(t.source, "#FFFFFF"))),
-                    float(pcfg.get("brightness", 0.8)))
+                    bfactor(pcfg.get("brightness", 100)))
         speed = float(pcfg.get("speed", 40))
         tail = float(pcfg.get("tail", 8.0))
-        phase = row_phase(now, speed, keys, tail)
         lit = None
         if t.progress and t.progress[1] > 0:
             frac = max(0.0, min(1.0, t.progress[0] / float(t.progress[1])))
             lit = int(round(len(keys) * frac))
-        m = lit_row_flow_map(keys, rgb, phase, tail, lit)
+        if str(pcfg.get("effect", "flow")) == "breathe":
+            m = row_breathe_map(keys, rgb, now,
+                                float(pcfg.get("breathe_period", 2.0)), lit)
+        else:
+            phase = row_phase(now, speed, keys, tail)
+            m = lit_row_flow_map(keys, rgb, phase, tail, lit)
         for i, c in m.items():
             if c != ZERO:
                 colors[i] = c

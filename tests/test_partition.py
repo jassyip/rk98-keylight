@@ -3,6 +3,7 @@
 运行(系统 Python 即可, 无需 hidapi):
   python tests/test_partition.py
 """
+import copy
 import os
 import sys
 import time
@@ -12,7 +13,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
 sys.path.insert(0, SRC)
 
-from effects import hex_rgb, row_flow_map, row_phase, scale  # noqa: E402
+from effects import (bfactor, hex_rgb, row_breathe_map, row_flow_map,  # noqa: E402
+                     row_phase, scale)
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS, VPOSITIONS  # noqa: E402
 from partition import PartitionManager  # noqa: E402
 
@@ -20,9 +22,10 @@ ZERO = (0, 0, 0)
 CFG = {
     "partition": {"enabled": True, "fail_flash_secs": 0.3,
                   "waiting_on_ms": 150, "waiting_off_ms": 100,
-                  "speed": 40, "fps": 30, "brightness": 0.8, "tail": 8.0},
+                  "effect": "flow", "breathe_period": 2.0,
+                  "speed": 40, "fps": 30, "brightness": 80, "tail": 8.0},
     "sources": {"workbuddy": {"color": "#00E676"}, "codex": {"color": "#2979FF"}},
-    "waiting": {"color": "#FF0000", "brightness": 0.8},
+    "waiting": {"color": "#FF0000", "brightness": 80},
     "done": {"color": "#00FF00", "times": 3, "on_ms": 200, "off_ms": 120},
     "service": {"stale_session_secs": 600},
 }
@@ -275,6 +278,139 @@ class TestTransientNotice(unittest.TestCase):
         m = mgr()
         m.signal("workbuddy", "ghost", "NOTICE")            # 无此任务 -> 忽略
         self.assertEqual(m.tasks, {})
+
+
+class TestBrightnessAndEffects(unittest.TestCase):
+    """亮度量表迁移(0-100 百分比)与分区呼吸效果的离线验证。"""
+
+    # ---------- bfactor 百分比换算 ----------
+    def test_bfactor_percent_scale(self):
+        self.assertEqual(bfactor(100), 1.0)
+        self.assertEqual(bfactor(50), 0.5)
+        self.assertEqual(bfactor(0), 0.0)
+        self.assertEqual(bfactor(150), 1.0)                # 超 100 截断
+        self.assertEqual(bfactor(-5), 0.0)                 # 负值截断
+
+    def test_bfactor_invalid_falls_back(self):
+        self.assertEqual(bfactor("abc"), 1.0)              # default=100
+        self.assertEqual(bfactor(None), 1.0)
+        self.assertEqual(bfactor("", default=80), 0.8)
+
+    # ---------- row_breathe_map 呼吸包络 ----------
+    def test_breathe_envelope(self):
+        keys = ROWS[0]
+        full = (0, 255, 0)
+        half = scale(full, 0.5)
+        m_half = row_breathe_map(keys, full, t=1.0)        # period=2.0 -> 半周期满色
+        for i in keys:
+            self.assertEqual(m_half[i], full)
+        m_zero = row_breathe_map(keys, full, t=0.0)        # 零点最暗
+        for i in keys:
+            self.assertEqual(m_zero[i], ZERO)
+        m_quarter = row_breathe_map(keys, full, t=0.5)     # 1/4 周期 ~ 半亮
+        for i in keys:                                     # cos(π/2) 浮点误差, 容差 1
+            for ch in range(3):
+                self.assertAlmostEqual(m_quarter[i][ch], half[ch], delta=1)
+
+    def test_breathe_lit_count_limits_keys(self):
+        keys = sorted(ROWS[1], key=lambda i: VPOSITIONS[i][0])
+        m = row_breathe_map(keys, (0, 255, 0), t=0.5, lit_count=3)
+        self.assertEqual(set(m), set(keys[:3]))            # 只亮最左 3 格
+        m_all = row_breathe_map(keys, (0, 255, 0), t=0.5, lit_count=99)
+        self.assertEqual(set(m_all), set(keys))            # 超过排长 -> 整排
+
+    # ---------- compose_frame 的 breathe 分支 ----------
+    def test_breathe_effect_frame(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["effect"] = "breathe"
+        cfg["partition"]["breathe_period"] = 2.0
+        m = PartitionManager(cfg)
+        m.signal("workbuddy", "a", "START")
+        full = scale(hex_rgb("#00E676"), 0.8)               # brightness=80
+        colors = m.compose_frame(now=1.0)                  # 半周期 -> 满色
+        for i in ROWS[0]:
+            self.assertEqual(colors[i], full)
+        colors = m.compose_frame(now=0.0)                  # 零点 -> 全暗
+        self.assertEqual(nonzero_keys(colors) & set(ROWS[0]), set())
+        colors = m.compose_frame(now=0.5)                  # 1/4 -> 半亮
+        for i in ROWS[0]:
+            self.assertEqual(colors[i], scale(full, 0.5))
+
+    def test_breathe_with_progress(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["effect"] = "breathe"
+        m = PartitionManager(cfg)
+        m.signal("workbuddy", "a", "START", {"progress": (1, 2)})
+        keys = sorted(ROWS[0], key=lambda i: VPOSITIONS[i][0])
+        lit = set(keys[:int(round(len(keys) * 0.5))])
+        for k in range(20):                                # 任意时刻只亮进度格
+            colors = m.compose_frame(now=0.05 * k)
+            nz = nonzero_keys(colors) & set(ROWS[0])
+            self.assertTrue(nz <= lit)
+
+    # ---------- brightness=100 时峰值键=来源色满值 ----------
+    def _phase_now(self, keys, target, speed=40.0, tail=8.0):
+        """反解 row_phase: 求让 target 键恰好位于流水波前的 now。"""
+        xs = [VPOSITIONS[i][0] for i in keys]
+        xmin, xmax = min(xs), max(xs)
+        span = float(xmax - xmin) + 2.0 * tail
+        return ((VPOSITIONS[target][0] - (xmin - tail)) % span) / speed
+
+    def test_brightness_100_peak_is_full_source_color(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["brightness"] = 100
+        m = PartitionManager(cfg)
+        m.signal("codex", "x", "START")
+        keys = sorted(ROWS[0], key=lambda i: VPOSITIONS[i][0])
+        target = keys[4]
+        colors = m.compose_frame(now=self._phase_now(keys, target))
+        self.assertEqual(colors[target], hex_rgb("#2979FF"),
+                         "brightness=100 时峰值键应为来源色满值")
+
+    def test_brightness_50_scales_peak(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["brightness"] = 50
+        m = PartitionManager(cfg)
+        m.signal("codex", "x", "START")
+        keys = sorted(ROWS[0], key=lambda i: VPOSITIONS[i][0])
+        target = keys[4]
+        colors = m.compose_frame(now=self._phase_now(keys, target))
+        self.assertEqual(colors[target], scale(hex_rgb("#2979FF"), 0.5),
+                         "brightness=50 时峰值键应为来源色半亮")
+
+    def test_waiting_brightness_percent(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["waiting"]["brightness"] = 50
+        m = PartitionManager(cfg)
+        m.signal("workbuddy", "a", "ASK")
+        red = scale(hex_rgb("#FF0000"), 0.5)
+        on_colors = m.compose_frame(now=0.0)                # 0 % 250 < 150 -> 亮
+        for i in ROWS[0]:
+            self.assertEqual(on_colors[i], red)
+
+    # ---------- _migrate_brightness 旧浮点迁移 ----------
+    def test_migrate_brightness_legacy(self):
+        import keylight
+        old = {"running": {"brightness": 0.8},
+               "waiting": {"brightness": 1.0},
+               "partition": {"brightness": 0.5}}
+        out = keylight._migrate_brightness(copy.deepcopy(old))
+        self.assertEqual(out["running"]["brightness"], 80)
+        self.assertEqual(out["waiting"]["brightness"], 100)
+        self.assertEqual(out["partition"]["brightness"], 50)
+
+    def test_migrate_brightness_new_untouched(self):
+        import keylight
+        new = {"running": {"brightness": 100},
+               "waiting": {"brightness": 30},
+               "partition": {"brightness": 80}}
+        out = keylight._migrate_brightness(copy.deepcopy(new))
+        self.assertEqual(out, new)                          # 新整数不动
+
+    def test_defaults_brightness_is_100(self):
+        import keylight
+        for sec in ("running", "waiting", "partition"):
+            self.assertEqual(keylight.DEFAULTS[sec]["brightness"], 100)
 
 
 if __name__ == "__main__":
