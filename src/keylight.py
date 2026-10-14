@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""rk98-keylight 常驻服务 — WorkBuddy 运行状态 -> RK98 键盘灯效
+"""wb-keylight 常驻服务 — WorkBuddy 运行状态 -> RK98 键盘灯效
 
 状态机:
-  IDLE     平常: 不发送任何帧, 键盘自动回退自带灯效(点击扩散)
-  RUNNING  运行中: 彩色流水(默认 rainbow)
-  WAITING  待确认: 红灯流水(默认 red flow, 由 Notification 触发)
-  DONE     完成: 绿灯闪烁(默认 green flash) -> 自动回 IDLE
+  全局模式(partition.enabled=false, 保留 M1-M3 行为):
+    IDLE     平常: 不发送任何帧, 键盘自动回退自带灯效(点击扩散)
+    RUNNING  运行中: 彩色流水(默认 rainbow)
+    WAITING  待确认: 红灯流水(默认 red flow, 由 Notification 触发)
+    DONE     完成: 绿灯闪烁(默认 green flash) -> 自动回 IDLE
+  分区模式(partition.enabled=true, M4):
+    每任务独占一排: WB=绿流水 / Codex=蓝流水 / 等待=红闪 / 完成=绿闪xN
+    详见 partition.py 与 M4-DESIGN.md
 
 事件源:
-  1. HTTP POST /event (hook.py 转发, 由 install_hooks.py 注册进 WorkBuddy)
-  2. 可选: 尾随外部事件文件 (source.tail_hook_events), 按 (session,event,gen) 去重
+  1. HTTP POST /event (hook.py 转发, install_hooks.py 注册)
+  2. 尾随 ~/.wb-switch/hook-events.jsonl (通道A, 按 (session,event,gen) 去重)
+  3. 尾随 ~/.codex/sessions/**(Codex rollout JSONL, codex_tail.py)
 """
 import argparse
 import json
@@ -26,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rk98 import RK98, RK98Error, kill_rk_app, rk_app_running  # noqa: E402
 from effects import hex_rgb, scale, solid_colors, flow_frame, rainbow_frame, breathe_frame  # noqa: E402
+from partition import PartitionManager  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -39,9 +45,14 @@ DEFAULTS = {
     "waiting": {"mode": "flow", "color": "#FF0000", "fps": 30, "brightness": 0.8, "speed": 40},
     "idle": {"mode": "hardware"},
     "conflict": {"close_rk_app": False},
+    "partition": {"enabled": True, "fail_flash_secs": 30,
+                  "waiting_on_ms": 150, "waiting_off_ms": 100,
+                  "speed": 40, "fps": 30, "brightness": 0.8, "tail": 8.0},
+    "sources": {"workbuddy": {"color": "#00E676"}, "codex": {"color": "#2979FF"}},
+    "codex": {"enabled": True, "sessions_dir": "~/.codex/sessions", "poll_secs": 2},
     "service": {"port": 18990, "stale_session_secs": 600, "final_grace_secs": 30,
                 "notice_secs": 20},
-    "source": {"tail_hook_events": False,
+    "source": {"tail_hook_events": True,
                "hook_events_path": ""},
 }
 
@@ -76,18 +87,35 @@ def load_config(path):
 
 
 def write_status(svc):
+    """原子写 status.json(临时文件 + replace), 多线程事件源并发安全"""
     try:
-        with open(STATUS_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "state": svc.state,
-                "paused": svc.paused,
-                "sessions": len(svc.sessions),
-                "waiting": len(svc.waiting),
-                "frames_sent": svc.kb.frames_sent,
-                "updated": time.strftime("%H:%M:%S"),
-            }, f, ensure_ascii=False)
+        data = {
+            "state": svc.state,
+            "paused": svc.paused,
+            "sessions": len(svc.sessions),
+            "waiting": len(svc.waiting),
+            "partition": svc.partition_on,
+            "tasks": svc.mgr.snapshot() if (svc.partition_on and svc.mgr) else [],
+            "frames_sent": svc.kb.frames_sent,
+            "updated": time.strftime("%H:%M:%S"),
+        }
+        tmp = STATUS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, STATUS_FILE)
     except Exception:
         pass
+
+
+def parse_todos(obj):
+    """从 TodoWrite 的 tool_input 解析 (done, total); 无有效 todo 返回 None"""
+    todos = obj.get("todos") if isinstance(obj, dict) else None
+    if not isinstance(todos, list) or not todos:
+        return None
+    total = len(todos)
+    done = sum(1 for x in todos if isinstance(x, dict)
+               and str(x.get("status", "")).lower() in ("completed", "complete", "done"))
+    return (done, total)
 
 
 class Service:
@@ -96,11 +124,14 @@ class Service:
         self.state = "IDLE"
         self.epoch = 0
         self.paused = False
-        self.sessions = {}          # sid -> 最后活动时间(运行中的任务)
-        self.waiting = set()        # 正在"等你拍板"的会话集合(可多个并存)
-        self.notice_until = 0.0     # Notification 信号的有效期(到期自动解除)
+        self.sessions = {}          # sid -> 最后活动时间(全局模式的运行中任务)
+        self.waiting = set()        # 全局模式: 正在"等你拍板"的会话集合
+        self.notice_until = 0.0     # 全局模式: Notification 信号有效期
+        # M4 分区模式: 任务 -> 排槽位(与 sessions/waiting 互斥, 按 partition_on 分叉)
+        self.partition_on = bool(cfg.get("partition", {}).get("enabled", False))
+        self.mgr = PartitionManager(cfg) if self.partition_on else None
         self.seen = OrderedDict()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()   # 分区模式下 _sync_global_state 会在锁内被调, 需可重入
         self.stop_event = threading.Event()
         self.httpd = None
         d = cfg["device"]
@@ -148,6 +179,13 @@ class Service:
             while len(self.seen) > 4000:
                 self.seen.popitem(last=False)
             now = time.time()
+            if self.partition_on and self.mgr is not None:
+                self._handle_partition(payload, ev, sid, now)
+                log.info("事件 %-18s session=%s… tool=%-14s -> %s(分区)",
+                         ev, sid[:8],
+                         str(payload.get("tool_name") or "-")[:14], self.state)
+                write_status(self)
+                return
             if ev in RUNNING_EVENTS:
                 # 用户提交 -> 该会话转为运行中
                 self.sessions[sid] = now
@@ -198,6 +236,76 @@ class Service:
                  str(payload.get("tool_name") or "-")[:14], self.state)
         write_status(self)
 
+    def _handle_partition(self, payload, ev, sid, now):
+        """M4 分区模式: WB hook 事件 -> 归一化信号 -> PartitionManager
+
+        与全局模式的差异:
+        - 每个 session 是独立任务(独占一排), 不再收敛成单一全局状态;
+        - 无 session_id 的 Notification 无法定位任务 -> 忽略(分区模式下等待
+          信号主要由 PreToolUse(AskUserQuestion) 驱动, 该事件带 sid, 可靠);
+        - TodoWrite 解析进度 -> 亮格填充(有总量才算真进度)。
+        """
+        mgr = self.mgr
+        if ev in RUNNING_EVENTS:
+            # 用户提交 -> 新一轮开始(已在 WAITING/DONE 的任务恢复 RUNNING)
+            mgr.signal("workbuddy", sid, "START",
+                       {"label": str(payload.get("cwd") or "")})
+        elif ev in WAITING_EVENTS:
+            if sid and sid != "unknown":
+                mgr.signal("workbuddy", sid, "ASK")
+        elif ev in HEARTBEAT_EVENTS:
+            tool = str(payload.get("tool_name") or "")
+            if ev == "PreToolUse" and tool in ASK_TOOLS:
+                mgr.signal("workbuddy", sid, "ASK")
+            elif ev == "PreToolUse" and tool == "TodoWrite":
+                prog = parse_todos(payload.get("tool_input") or payload.get("tool_response"))
+                mgr.signal("workbuddy", sid, "HEARTBEAT",
+                           {"progress": prog} if prog else None)
+            else:
+                # 任何其它工具(含提问工具返回) = 已答复, 解除等待
+                mgr.signal("workbuddy", sid, "HEARTBEAT")
+        elif ev in END_EVENTS or ev == "FinalStop":
+            if ev == "FinalStop":
+                # 清理没收到 Stop 的沉默会话(否则永远占着排)
+                grace = float(self.cfg["service"].get("final_grace_secs", 30))
+                dead = mgr.close_stale("workbuddy", now - grace)
+                if dead:
+                    log.info("FinalStop 清理沉默任务: %s", [d[:8] for d in dead])
+            mgr.signal("workbuddy", sid, "END")
+        elif ev in CLOSE_EVENTS:
+            # 会话关闭 -> 直接释放不闪绿(不算完成)
+            mgr.signal("workbuddy", sid, "CLOSE")
+        self._sync_global_state()
+
+    def apply_signal(self, source, task_id, kind, extra=None):
+        """归一化信号入口(供 codex_tail 等外部源调用; 分区模式未启用时忽略)"""
+        if self.partition_on and self.mgr is not None:
+            self.mgr.signal(source, task_id, kind, extra)
+            self._sync_global_state()
+        else:
+            log.info("分区模式未启用, 忽略 %s 信号: %s %s", source,
+                     str(task_id)[:8], kind)
+
+    def _sync_global_state(self):
+        """分区模式: 由任务表推导全局态(托盘图标/状态栏)"""
+        if self.partition_on and self.mgr is not None:
+            gs = self.mgr.global_state()
+            if gs != self.state:
+                self._set_state(gs)
+
+    def inject_demo(self, overflow=False, secs=30):
+        """注入演示任务(不依赖真实 agent); 分区模式未开启时自动开启"""
+        with self.lock:
+            if not self.partition_on or self.mgr is None:
+                self.partition_on = True
+                self.mgr = PartitionManager(self.cfg)
+            self.paused = False
+            ids = (self.mgr.inject_demo_overflow(secs) if overflow
+                   else self.mgr.inject_demo(secs))
+            self._sync_global_state()
+        log.info("演示任务已注入: %s", ids)
+        return ids
+
     def _recompute(self, done_ok=False, note_waiting=False):
         """由 sessions/waiting 推导应显示的状态 — 多任务并发的唯一决策点
 
@@ -242,8 +350,33 @@ class Service:
         write_status(self)
 
     def force_state(self, s):
-        """调试/测试用: 强制进入某状态(不登记会话)"""
+        """调试/测试用: 强制进入某状态(不登记会话)
+
+        分区模式下没有"无任务的全局状态", 旧测试按钮映射为注入对应状态的
+        演示任务(30s 后自动收尾); IDLE = 清空全部任务。
+        """
         with self.lock:
+            if self.partition_on and self.mgr is not None:
+                self.paused = False
+                if s == "IDLE":
+                    self.mgr.clear_all()
+                    self._sync_global_state()
+                elif s == "RUNNING":
+                    self.mgr.clear_all()
+                    self.mgr.inject_demo(secs=30)
+                    self._sync_global_state()
+                elif s == "WAITING":
+                    self.mgr.clear_all()
+                    self.mgr.signal("workbuddy", "demo-wait", "ASK",
+                                    {"label": "测试 · 待确认"})
+                    self._sync_global_state()
+                elif s == "DONE":
+                    self.mgr.clear_all()
+                    self.mgr.signal("workbuddy", "demo-done", "START",
+                                    {"label": "测试 · 完成"})
+                    self.mgr.signal("workbuddy", "demo-done", "END")
+                    self._sync_global_state()
+                return
             self._set_state(s)
 
     def clear_sessions(self):
@@ -253,14 +386,33 @@ class Service:
             self.sessions.clear()
             self.waiting.clear()
             self.notice_until = 0.0
-            if self.state in ("RUNNING", "WAITING"):
+            if self.partition_on and self.mgr is not None:
+                n += self.mgr.clear_all()
+            if self.state in ("RUNNING", "WAITING", "DONE"):
                 self._set_state("IDLE")
         log.info("已清除 %d 个会话, 回 IDLE", n)
 
     def apply_config(self, cfg):
-        """设置界面保存后热更新(渲染器每帧读 cfg, 立即生效)"""
+        """设置界面保存后热更新(渲染器每帧读 cfg, 立即生效);
+        分区模式开关在这里热切换(开: 建 PartitionManager; 关: 清任务回全局)"""
         with self.lock:
             deep_merge(self.cfg, cfg or {})
+            want = bool(self.cfg.get("partition", {}).get("enabled", False))
+            if want and not self.partition_on:
+                self.partition_on = True
+                self.mgr = PartitionManager(self.cfg)
+                log.info("分区模式已开启(热切换)")
+            elif not want and self.partition_on:
+                self.partition_on = False
+                if self.mgr is not None:
+                    self.mgr.clear_all()
+                self.mgr = None
+                self.sessions.clear()
+                self.waiting.clear()
+                self.notice_until = 0.0
+                if self.state in ("RUNNING", "WAITING", "DONE", "FAIL"):
+                    self._set_state("IDLE")
+                log.info("分区模式已关闭(热切换), 回到全局模式")
         log.info("配置已热更新")
 
     def janitor(self):
@@ -269,6 +421,12 @@ class Service:
             time.sleep(3)
             now = time.time()
             with self.lock:
+                if self.partition_on and self.mgr is not None:
+                    # 分区模式: DONE/FAIL 到期释放, 僵死任务直接释放,
+                    # 演示任务到期走完整绿闪(全部由 PartitionManager.janitor 负责)
+                    if self.mgr.janitor(now):
+                        self._sync_global_state()
+                    continue
                 # 1) 通知信号到期 -> 自动解除(否则没人发事件时红灯会一直亮)
                 if self.notice_until and now > self.notice_until:
                     self.notice_until = 0.0
@@ -298,18 +456,43 @@ class Renderer(threading.Thread):
                 if self.svc.paused:
                     time.sleep(0.2)
                     continue
-                st = self.svc.state
-                if st == "RUNNING":
+                if self.svc.partition_on and self.svc.mgr is not None:
+                    self.render_partition()
+                elif self.svc.state == "RUNNING":
                     self.render_running()
-                elif st == "DONE":
+                elif self.svc.state == "DONE":
                     self.render_done()
-                elif st == "WAITING":
+                elif self.svc.state == "WAITING":
                     self.render_waiting()
                 else:
                     time.sleep(0.2)
             except Exception as e:
                 log.warning("renderer 异常: %s", e)
                 time.sleep(1)
+
+    def render_partition(self):
+        """M4 分区渲染: 每帧合成一张 100 键全帧(6 排 + 溢出半区共享一帧缓冲,
+        与全局模式同为 8 个 Feature 报表/帧)。无任务时停流(键盘回硬件灯效)。"""
+        svc = self.svc
+        mgr = svc.mgr
+        pcfg = svc.cfg.get("partition", {})
+        fps = max(float(pcfg.get("fps", 30)), 1.0)
+        interval = 1.0 / fps
+        while (not svc.stop_event.is_set() and not svc.paused
+               and svc.partition_on and mgr is not None):
+            if not mgr.has_active():
+                svc._sync_global_state()      # 任务全部释放 -> IDLE -> 停流
+                time.sleep(0.15)
+                continue
+            t0 = time.time()
+            colors = mgr.compose_frame(t0)
+            if not svc.kb_send(colors):
+                time.sleep(0.5)
+                continue
+            svc._sync_global_state()
+            d = t0 + interval - time.time()
+            if d > 0:
+                time.sleep(d)
 
     def _alive(self, epoch):
         svc = self.svc
@@ -446,6 +629,21 @@ class Handler(BaseHTTPRequestHandler):
             self.service.handle_event(payload)
         else:
             # 手动触发某状态(设置界面的测试按钮 / 脚本化演示)
+            action = str(payload.get("action") or "").upper()
+            if action == "DEMO":
+                # 注入演示任务: WB x2 + Codex x1(等确认), secs 秒后绿闪收尾
+                self.service.inject_demo(
+                    overflow=False, secs=min(120, max(3, float(payload.get("secs", 30)))))
+                log.info("演示分区已启动")
+                self._reply(b'{"ok":true}')
+                return
+            if action == "DEMO_OVERFLOW":
+                # 溢出演示: 7 WB + 3 Codex -> 6 上排 + 两边溢出半区
+                self.service.inject_demo(
+                    overflow=True, secs=min(120, max(3, float(payload.get("secs", 30)))))
+                log.info("演示溢出已启动")
+                self._reply(b'{"ok":true}')
+                return
             state = str(payload.get("state") or "RUNNING").upper()
             if state == "IDLE":
                 self.service.clear_sessions()
@@ -465,6 +663,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _reply(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path != "/status":
             self.send_error(404)
@@ -474,6 +679,9 @@ class Handler(BaseHTTPRequestHandler):
             "state": svc.state,
             "paused": svc.paused,
             "sessions": len(svc.sessions),
+            "partition": svc.partition_on,
+            "tasks": (svc.mgr.snapshot()
+                      if (svc.partition_on and svc.mgr) else []),
             "frames_sent": svc.kb.frames_sent,
             "connected": svc.kb.dev is not None,
         }, ensure_ascii=False).encode("utf-8")
@@ -516,17 +724,20 @@ def start_service(cfg):
     threading.Thread(target=svc.janitor, daemon=True).start()
     if cfg["source"].get("tail_hook_events"):
         Tailer(svc, cfg["source"].get("hook_events_path")).start()
+    if cfg.get("codex", {}).get("enabled", True):
+        from codex_tail import CodexTailer
+        CodexTailer(svc, cfg).start()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     svc.httpd = httpd
-    log.info("rk98-keylight 服务已启动: http://127.0.0.1:%d/event", port)
+    log.info("wb-keylight 服务已启动: http://127.0.0.1:%d/event", port)
     return svc
 
 
 def run_service(cfg):
     svc = start_service(cfg)
-    log.info("状态: %s", svc.state)
+    log.info("状态: %s (config: %s)", svc.state, DEFAULT_CONFIG)
     try:
         while not svc.stop_event.is_set():
             time.sleep(1)

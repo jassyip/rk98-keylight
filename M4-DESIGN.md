@@ -1,0 +1,273 @@
+# M4 分区模式设计 — 每排一任务 × Codex 接入
+
+> 状态：**用户已拍板（2026-10-14）**。本文是实施前的最终设计。协议层（rk98.py / keymap.py 帧结构）零改动，M4 只改"谁上什么色"的决策层。
+
+## 0. 与 M1–M3 的关系
+
+- M1–M3 交付的全局模式（彩色流水 / 红灯流水 / 绿灯闪 / 停流回硬件）**完整保留**，作为可配置回退。
+- M4 新增：任务 → 排槽位分区渲染 + Codex 信号源 + 托盘任务映射表。
+- 关键事实（来自 keymap.py 实测推导，**修正此前口误**）：
+  - 主键区 6 排 = **19 / 14 / 14 / 13 / 13 / 10** 键（共 83）；
+  - numpad = **17 键**（不是 18），按网格 x 坐标分半：**左半 10 键 / 右半 7 键**。
+
+## 1. 编码规则（已确认）
+
+两个正交维度：**颜色 = 来源，模式 = 状态**。比"颜色=状态"更优——加第三种 agent 只需加一个颜色。
+
+| 任务状态 | WorkBuddy 任务 | Codex 任务 |
+| --- | --- | --- |
+| 运行中 | 绿色流水（排内） | 蓝色流水（排内） |
+| 待确认 | 红色闪烁·持续到确认 | 同左 |
+| 完成 | 绿色闪烁 ×N（次数/亮灭 ms 面板可调，沿用现有 done 配置） | 同左（完成是通用终止态，覆盖来源色） |
+| 失败（Codex `turn.failed`） | —（WB 无此态） | 红色闪烁·持续，`fail_flash_secs`（默认 30s）后自动释放 |
+
+- 色盲友好：红闪（一直闪）vs 绿闪（闪 N 次后停）靠**时序**区分；蓝/绿流水靠色相 + 所在排区分。
+- 绿的双重身份（运行=绿流 / 完成=绿闪）靠**流→闪的模式切换**表达完成信号，可接受。
+
+## 2. 键位分区
+
+主键区 6 排 = 6 个任务槽；numpad 17 键 = 溢出区，左右分半。
+
+| 槽位 | 物理排（网格 y） | 键数 | 内容 |
+| --- | --- | --- | --- |
+| P1 | y=0 | 19 | Esc / F1–F12 / PrintScreen / Del / Home / Insert / PageUp / PageDown |
+| P2 | y=2 | 14 | ` 1…0 -_ += Backspace（不含 numpad） |
+| P3 | y=4 | 14 | Tab Q…P [ ] \ |
+| P4 | y=6 | 13 | Caps A…L ; ' Enter |
+| P5 | y=8 | 13 | Shift Z…M , . / RShift Up |
+| P6 | y=10 | 10 | Ctrl Win Alt Space Alt Fn RCtrl ← ↓ → |
+
+**溢出区**（numpad 17 键，按 x 坐标切两半）：
+
+- 左半（x ≤ 30，**10 键**）= Codex 溢出：NumLock Num7 Num4 Num1 Num0 Num/ Num8 Num5 Num2 Num.
+- 右半（x ≥ 32，**7 键**）= WorkBuddy 溢出：Num\* Num9 Num6 Num3 Num- Num+ NumEnter
+
+溢出语义：**颗数 = 溢出任务数**（封顶 10/7，超出显示满半区）；该半区按内部最高优先级状态动画（等确认 > 失败 > 完成 > 运行）；无溢出时全暗。溢出即降级——不区分个体，只看颗数和紧急度。
+
+## 3. 分区状态机
+
+### 3.1 任务记录
+
+`task_id`（WB: session_id；Codex: thread_id）→ TaskRec：
+
+| 字段 | 说明 |
+| --- | --- |
+| `source` | `"workbuddy"` / `"codex"` |
+| `state` | `RUNNING` / `WAITING` / `DONE` / `FAIL` |
+| `slot` | 0..5，分配后**稳定不换排** |
+| `progress` | `(done_steps, total_steps)` 或 None；另有 `steps` 活动度计数 |
+| `label` | cwd / 首条用户消息（面板显示用，键盘上不可见） |
+| `last_seen` | 心跳时间戳（僵死清理用） |
+| `fail_until` | FAIL 自动释放时刻 |
+
+### 3.2 排分配 / 回收
+
+- **分配**：任务创建时取**最小空闲槽位**（视觉顺序 = 创建顺序，先到先得）。
+- **稳定**：任务存活期间槽位不变；中间槽释放**不触发重排**（空出的槽才被新任务使用）——避免视觉跳动。
+- **回收**四条路径：
+  1. `Stop` / `turn.completed` → **DONE**（整排绿闪 ×N）→ 播完释放槽位；
+  2. `SessionEnd` / thread 关闭 → **直接释放，不闪绿**（会话关闭不算完成）；
+  3. 僵死（`stale_session_secs` 无心跳，janitor 清理）→ 直接释放，不算完成；
+  4. FAIL → `fail_flash_secs` 后释放。
+- **溢出**：无空闲槽且新任务到来 → 进对应来源的溢出半区。
+
+### 3.3 停流时机
+
+- 所有槽空闲 **且** 两个溢出半区全暗 → 立即停流，键盘回硬件灯效（点击扩散）。
+- 最后一项任务的绿闪播完才停（绿闪期间持续推流）。
+- **无"全场绿闪谢幕"**——每个任务完成只闪自己那排（用户最终拍板，取代早期方案）。
+
+## 4. 渲染规则
+
+每帧合成一张 100 键全帧下发。所有分区共享同一帧缓冲，6 排同时渲染**零额外带宽**（与全局模式同为 8 个 Feature 报表/帧）。
+
+| 任务状态 | 该排渲染 |
+| --- | --- |
+| RUNNING（有 plan） | **亮格内**跑来源色流水（亮格数 = 完成步骤/总步骤，从左到右填），未亮格暗 |
+| RUNNING（无 plan） | 整排来源色流水，不填充（活动度无总量，填充即假进度） |
+| WAITING | 整排红闪，持续；进度冻结，确认后回到原进度继续 |
+| DONE | 整排绿闪 ×`done.times`（亮灭用 `done.on_ms/off_ms`），播完释放 |
+| FAIL | 整排红闪，持续到自动释放 |
+
+- **排内流水**：波前只在该排的 x 范围扫描（不是全键盘 37 列），观感 = 波浪沿这一排跑。
+- **进度来源两档**：
+  - WB：`PreToolUse` 且 `tool_name=TodoWrite` → 解析 `tool_input.todos` 的 status → 完成/总数；
+  - Codex：rollout 中 plan 类 `item.completed` → 完成/总数（schema 待 E3 核对）；
+  - 都没有 → 只流水不填充。
+
+## 5. Codex 信号源
+
+### 5.1 三源优先级
+
+1. **rollout JSONL 尾随（主力，全版本可用）**：`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`，追加式事件流，信息量比 hook 更大；
+2. **notify hook（补充）**：`~/.codex/config.toml` 根级 `notify=[...]`，**仅 turn 完成**时触发，payload 带 thread-id / turn-id / cwd / 最后消息——做"完成确认"和会话身份绑定的备份通道；
+3. **hooks.json（可选）**：需 `[features] hooks=true` 且首次手动信任，事件名与 WB 几乎一致——版本够就用，不够不强求。
+
+### 5.2 rollout 事件 → 内部信号映射（**E3 已实测定稿**）
+
+以下为 2026-10-14 凌晨对本机 12 个最新 rollout 文件（codex-cli 0.162.0-alpha.17.2）的全量词汇表聚合结果，取代此前的文档假设：
+
+| rollout 事件（实测存在） | 内部信号 | 效果 |
+| --- | --- | --- |
+| `session_meta`（文件首行） | TASK_START(codex) | 建任务、分配槽位；payload 带 `session_id` / `cwd` / `cli_version` |
+| `event_msg/task_started` | HEARTBEAT | 刷新心跳（一个 turn 开始） |
+| `event_msg/item_completed`（`item.type` ∈ CommandExecution / AgentMessage / McpToolCall / Reasoning / UserMessage / Extension） | HEARTBEAT（steps+1） | 步数活动度；CommandExecution 计为有效工作步 |
+| `event_msg/task_complete` | TASK_END | DONE 绿闪（payload 带 `turn_id` + `last_agent_message`，可做面板标签） |
+| `event_msg/turn_aborted` | TASK_FAIL | FAIL 红闪（**真实的失败事件名，不是 `turn.failed`**） |
+| （无对应事件） | TASK_CLOSE | 会话停滞超 `stale_session_secs` → janitor 直接释放，不闪绿 |
+
+**实测不存在的三类事件（设计假设被推翻，相应能力裁剪）**：
+
+1. **审批类事件完全不在 rollout 里**（桌面版审批在 App 内处理，不落盘；聚合的 "approval" 命中全是 `approval_policy` 配置字段）→ **Codex 没有 WAITING 信号源**。唯一途径是 `~/.codex/hooks.json` 的 `PermissionRequest` 事件，但该文件已被第三方工具 Agent Studio 占用——追加 hook 组（append-only、非破坏）列为**可选后续，默认不做**；
+2. **没有 plan 类事件** → Codex 进度只有步数活动度，**不做亮格填充**（"有 plan 填充"仅适用于 WB 的 TodoWrite）；
+3. **`notify` 通道本机不可用**：`~/.codex/config.toml` 的 `notify` 已指向 Codex 桌面版自己的 computer-use 组件，无法追加我们的转发器 → **rollout 尾随是唯一信号源**（本来也是主力，影响可控）。
+
+**其它实测事实**：`~/.codex/sessions` 下 140 个 rollout **全部明文，无 .zst 压缩**（5 个月前的文件仍可读）→ 压缩处理降级为防御性分支；存在 `archived_sessions/` 目录（用户归档的会话），尾随只盯 `sessions/` 活跃目录；一个文件 = 一个会话（多 turn 追加在同一文件），子 agent 会话（如 guardian 审查）有独立文件和 `parent_thread_id`。
+
+**信号归一化层**：`Service.apply_signal(source, task_id, kind, extra)` 为唯一入口。WB 侧现有 `handle_event` 把 9 个 hook 事件映射成同一组信号（现有逻辑改为调用 apply_signal，行为不变）；Codex 侧由 codex_tail 映射。两条源共用一套槽位状态机。
+
+### 5.3 尾随容错（codex_tail.py）
+
+- **torn line**：只解析以 `\n` 结尾的行，残行留缓冲等下一次读；
+- **文件发现**：每 2s glob 今天 + 昨天两个目录；记录已见文件路径；新文件延迟 1s 从头读（防半写 header）；
+- **压缩轮转**：7 天前文件变 `.jsonl.zst`——原路径消失即标记关闭，**跳过 .zst 不解析**；
+- **`--ephemeral`**：不落盘 → 仅 notify 兜底（进度丢失，至少完成态不丢），文档明示此限制；
+- **服务重启**：新文件从头读、旧文件只读尾部新增；旧任务不补渲染（键盘是实时指示器，可接受）。
+
+### 5.4 notify 接入（可选通道）
+
+`~/.codex/config.toml` 追加（先备份）：
+
+```toml
+notify = ["<python.exe>", "<rk98-keylight>/src/codex_notify.py"]
+```
+
+`codex_notify.py`：读 stdin JSON → 裸 socket POST `127.0.0.1:18990/event`（复用 hook.py 的发送方式：绕开 HTTP_PROXY、1s 超时），payload 带 `source="codex"`。仅作 `turn.completed` 的备份通道。
+
+## 6. 配置与面板
+
+### 6.1 config.json 新增段
+
+```json
+"partition": {
+  "enabled": true,
+  "fail_flash_secs": 30,
+  "waiting_mode": "flash",
+  "waiting_on_ms": 150,
+  "waiting_off_ms": 100,
+  "overflow": { "codex": 10, "workbuddy": 7 }
+},
+"sources": {
+  "workbuddy": { "color": "#00E676" },
+  "codex":     { "color": "#2979FF" }
+},
+"codex": { "enabled": true, "sessions_dir": "~/.codex/sessions", "poll_secs": 2 }
+```
+
+- `running` / `waiting` / `done` 现有段**全部保留**：全局回退模式继续用；分区模式直接复用 `done` 的次数/亮灭 ms 和 `running` 的速度/帧率/亮度；
+- `partition.enabled=false` → 一键回退现有全局模式（托盘复选框控制）。
+
+### 6.2 托盘面板改动（tray.py）
+
+- 新增"分区模式"框：启用开关 / WorkBuddy 运行色 / Codex 运行色 / 失败闪烁秒数 / **"演示分区"按钮**（注入 WB×2 + Codex×1 三个假任务跑 30s，不依赖真实 agent 即可验证观感）；
+- 新增**任务映射表**（只读，0.5s 刷新）：排号 | 来源 | 状态 | 进度 | cwd/标签——键盘上显示不出的文字身份在这里补足；
+- 状态栏扩展：分区模式下显示"进行中 N/6 排 · 溢出 c/w"；
+- 现有控件全部保留（全局模式仍可配可测）。
+
+## 7. 代码改动清单
+
+| 文件 | 改动 | 预估 |
+| --- | --- | --- |
+| `src/keymap.py` | 导出 `ROWS` / `NUMPAD_LEFT` / `NUMPAD_RIGHT` 常量（纯数据推导，协议不动） | +25 行 |
+| `src/effects.py` | 排内流水波、亮格填充、排级红/绿闪帧 | +70 行 |
+| `src/partition.py`（新） | 任务表 + 槽位分配器 + 帧合成器 | ~220 行 |
+| `src/keylight.py` | `apply_signal` 归一化；任务表；Renderer 分区分支；`/status` 扩展；DEMO 注入 | ~160 行 |
+| `src/codex_tail.py`（新） | rollout 尾随 + 容错 + 事件映射 | ~190 行 |
+| `src/codex_notify.py`（新） | notify 转发（可选备份通道） | ~45 行 |
+| `src/tray.py` | 分区设置框 + 任务映射表 + 演示按钮 | ~130 行 |
+| `config.json` | 新段（默认分区开） | +30 行 |
+
+合计约 870 行，**协议层 0 行**。
+
+## 8. 验证计划（E1/E2/E3 已于 2026-10-14 凌晨执行完毕，结果见第十节）
+
+~~先做三个探针再动代码~~ → **已完成**：
+
+- ~~**E1 zone 局部推送**~~ → 已测：无读回通道无法判定生效性；耗时 1.63x 但瓶颈不在传输 → **维持全帧推送，优化存档**；
+- ~~**E2 单排渲染**~~ → 已测：30fps 节流精确达成、无节流 42fps；**实测抓出网格阈值推导会误杀导航键的 bug**，已修为 keymap.py 显式常量 + assert；
+- ~~**E3 Codex 环境**~~ → 已测：CLI 0.162.0-alpha.17.2 在装且活跃；事件词汇表实测定稿（见 5.2）；审批/plan/notify 三项能力按实测裁剪。
+
+**新的验证策略（因设备无读回而确立）**：灯效"是否生效"无法从设备侧回读，改为三层——
+
+1. **离线单元测试（主力）**：对分区帧合成器做确定性断言——给定任务表，断言产出的 100 键颜色数组逐键符合预期（哪排亮、亮什么色、溢出半区颗数、暗键为 (0,0,0)）。合成逻辑是纯函数，可 100% 机器判定；
+2. **写入 ACK**：`send_feature_report` 每包返回 65 字节即被 HID 驱动真实接收（现有错误处理已覆盖重连）；
+3. **用户终验**：托盘"演示分区"按钮注入假任务，用户方便时一眼确认观感。
+
+端到端验证顺序：单元测试 → 演示模式注入假任务 → 真实 WB 任务上排 → 真实 Codex 任务上排（尾随真实 rollout）→ 完成绿闪释放 → 溢出演示（注入 8 个任务）→ 停流回硬件。
+
+## 9. 风险
+
+1. ~~**E3 可能推翻 schema 假设**~~ → **已发生并定稿**：审批/plan/notify 三项不存在或不可用，Codex 信号收敛为 rollout 单源，映射表见 5.2；
+2. **单排 10~19 键的流水观感**可能比全键盘稀薄——单元测试只能验逻辑，观感待演示按钮人工确认；参数（波尾 tail、速度）已在配置里可调；
+3. **等待红闪整排常闪**可能干扰打字视线——`waiting_on/off_ms` 可调，默认 150/100ms 偏快偏醒目；
+4. **设备无读回通道**（E0 实测）：任何"灯效是否正确"的设备侧自动判定都不可行，只能靠离线单元测试 + 写入 ACK + 人工终验三层兜底；
+5. **Codex 无 WAITING 信号**：桌面版审批不落盘，Codex 任务等待确认时键盘无红闪提示（WB 侧不受影响）。可选后续：向 `~/.codex/hooks.json` append PermissionRequest hook 组（Agent Studio 已占用该文件，需非破坏式追加，默认不做）。
+
+## 十、探针实测记录（2026-10-14 00:45–01:00，无人值守，服务暂停 5 分钟后已恢复）
+
+探针脚本：`probes/hw_probe.py`（readback / single-row / zone-partial 三个子命令）。执行时停止托盘服务独占 HID，结束后重启并验证 `/status` 正常（`connected: true`）。
+
+### E0 读回能力 — **不可用（定论）**
+
+- `get_feature_report(0x0A, 65)` 不报错，但回传固定模式 `01 01 01 01 01 00 00 00` 循环，**发送任意帧前后内容完全一致**；
+- 扫描报表 ID 0x00–0x30：只有 0x0A 有响应，且内容静态。
+- 结论：**RK98 灯效状态只写不可读**。所有"是否生效"的验证改走离线单元测试（第 8 节）。
+
+### E1 zone 局部推送 — **不启用（存档）**
+
+- 生效性无法判定（无读回）：只推 zone3+commit 是否被设备应用，机器不可验证；
+- 耗时实测：全帧 8 报表 **23.56 ms/帧**（理论 42fps）vs 局部 4 报表 **14.49 ms/帧**（理论 69fps），加速 1.63x；
+- 但真实瓶颈是**帧生成**（服务端彩虹帧 ~12fps vs 裸写 42fps，差 3.5 倍在 Python 计算），局部推送省的传输时间杯水车薪；
+- **决策：维持全帧推送（现网验证过的路径），1.63x 优化存档**，待用户视觉确认有新需求再捡起。
+
+### E2 单排渲染 — **通过，并抓出一个真 bug**
+
+- 30fps 节流精确达成（150 帧/5.0s），无节流 42fps——**协议层余量充足，分区模式带宽无忧**（6 排共享一帧，与全局模式同价）；
+- **抓 bug**：初版行推导用网格阈值 `x>=27` 剔除 numpad，把第 1 排导航键（Del/Home/Insert/PageUp/PageDown）误杀（P1 算成 14 键）；改用 `y>=2` 叠加后仍错——根因是**第 2 排 Backspace 的网格 x=27 与 numpad 相邻**，网格坐标布局本身不规整；
+- **修复**：`keymap.py` 增加显式常量 `ROWS`（19/14/14/13/13/10）/ `NUMPAD_LEFT`（10 键）/ `NUMPAD_RIGHT`（7 键），全部带 assert 自检（100 键覆盖完整、分半不重不漏），探针改引用常量。**这类错误正是无人值守验证的价值：在写实现前拦下。**
+
+### E3 Codex 环境 — **通过（情报见 5.2）**
+
+- codex-cli 已安装（桌面版，版本 0.162.x），用户在活跃使用（最新 rollout 为 10-13）；
+- 事件词汇表实测聚合（12 文件）：`session_meta` / `event_msg/{task_started, item_completed, task_complete, turn_aborted, token_count, thread_settings_applied}` / `response_item/{message, reasoning, function_call, custom_tool_call...}` / `turn_context` / `token_usage_record` / `world_state`；
+- `item_completed` 的 `item.type` 实测：Reasoning / CommandExecution / AgentMessage / UserMessage / McpToolCall / Extension；
+- **无审批事件、无 plan 事件、notify 被占用、无 .zst 压缩**——四项能力按实测裁剪（详见 5.2）。
+
+### 工程量台账更新
+
+| 项 | 状态 |
+| --- | --- |
+| `keymap.py` ROWS/NUMPAD_LEFT/NUMPAD_RIGHT + assert | **已完成**（探针期间落地） |
+| `probes/hw_probe.py` 三探针 | **已完成** |
+| `src/effects.py` 排级帧函数（row_phase/row_flow_map/lit_row_flow_map） | **已完成** |
+| `src/partition.py` 帧合成器 + 状态机 | **已完成** |
+| `tests/test_partition.py`（16 用例，帧合成逐键断言） | **已完成，16/16 通过** |
+| `src/keylight.py` apply_signal 归一化 / 分区渲染 / janitor / /status / /test DEMO | **已完成** |
+| `src/codex_tail.py` rollout 尾随 + 容错 | **已完成** |
+| `tests/test_codex_tail.py`（5 用例，含真实样本严格对账） | **已完成，5/5 通过** |
+| `src/tray.py` 分区设置框 / 任务映射表 / 演示按钮 | **已完成** |
+| `config.json` partition/sources/codex 新段 | **已完成**（分区默认开） |
+
+**实施期实测抓到的 2 个 bug（均被离线测试拦下）**：
+
+1. `task_complete`/`turn_aborted` 的 payload **不带 thread_id**（只有 turn_id）→ 完成/失败信号被 tid 空值丢弃。修复：tailer 按文件记住最近活跃 thread_id（一个文件=一个会话），完成信号落到当前活跃线程；
+2. 测试侧口径问题若干（进度边界重叠、fail_flash 0.5s 钳制、防半写 1s 延迟）——非产品 bug，但逼得把边界语义写清楚。
+
+**端到端验证记录（2026-10-14 09:10–09:14，无人值守）**：
+
+- 服务以分区模式重启：`/status` 返回 `partition:true, connected:true`；
+- 真实 WB hook 自动上排：当前对话会话占 slot 0（steps 随工具调用增长）——证明 WB 侧归一化链路真实工作；
+- 演示分区（3 任务）：slot 1/2/3，codex 任务 WAITING（全局态 WAITING，红闪），6s 到期全部走完 绿闪→释放；
+- 演示溢出（10 任务）：6 上排 + Codex 溢 3 / WB 溢 2，颗数与优先级符合设计；
+- 精确停流证明：清除任务后 frames 冻结（A=B=789，state=IDLE，tasks=0）；
+- Codex 尾随线程启动正常，旧文件正确识别为"只读尾部"；无真实 codex 活动时无信号（设计原则）。

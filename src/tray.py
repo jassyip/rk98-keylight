@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rk98-keylight 托盘启动器 — 带设置界面
+"""wb-keylight 托盘启动器 — 带设置界面
 
 用法:
   pythonw tray.py          # 无窗口常驻(开机自启用这个)
@@ -35,7 +35,7 @@ FIRST_RUN_FLAG = os.path.join(ROOT, ".settings-shown")
 STARTUP_DIR = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")),
     "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-STARTUP_CMD = os.path.join(STARTUP_DIR, "rk98-keylight.cmd")
+STARTUP_CMD = os.path.join(STARTUP_DIR, "wb-keylight.cmd")
 PYTHONW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
 TRAY_SCRIPT = os.path.abspath(__file__)
 
@@ -47,8 +47,10 @@ STATE_TEXT = {
     "RUNNING": "运行中 · 彩色流水",
     "WAITING": "待确认 · 红灯流水",
     "DONE": "完成 · 绿灯闪烁",
+    "FAIL": "失败 · 红闪(即将释放)",
 }
-STATE_ICON = {"IDLE": (110, 110, 110), "WAITING": (235, 30, 30), "DONE": (0, 200, 70)}
+STATE_ICON = {"IDLE": (110, 110, 110), "WAITING": (235, 30, 30),
+              "DONE": (0, 200, 70), "FAIL": (255, 140, 0)}
 
 
 def autostart_enabled():
@@ -56,17 +58,13 @@ def autostart_enabled():
 
 
 def write_autostart(enable):
-    """开/关开机自启(写入用户启动文件夹的 rk98-keylight.cmd)
-
-    用相对路径 + 脚本自身位置定位, 这样整个项目目录可以随意搬动/改名。
-    """
+    """开/关开机自启(写入用户启动文件夹的 wb-keylight.cmd)"""
     if enable:
         os.makedirs(STARTUP_DIR, exist_ok=True)
-        # bat 从 %~dp0 取自身目录, 再上溯一层到项目根 -> src\tray.py
         with open(STARTUP_CMD, "w", encoding="utf-8", newline="") as f:
             f.write("@echo off\r\n"
-                    "rem rk98-keylight autostart (tray). Auto-generated - do not edit.\r\n"
-                    'start "" /min "%s" "%%~dp0..\\src\\tray.py"\r\n' % PYTHONW)
+                    "rem wb-keylight autostart (tray)\r\n"
+                    'start "" /min "%s" "%s"\r\n' % (PYTHONW, TRAY_SCRIPT))
         log.info("已开启开机自启: %s", STARTUP_CMD)
     elif os.path.exists(STARTUP_CMD):
         os.remove(STARTUP_CMD)
@@ -119,10 +117,10 @@ class App:
         try:
             self.svc = KL.start_service(self.cfg)
         except KL.ServiceAlreadyRunning:
-            messagebox.showinfo("rk98-keylight", "已经在运行了 — 直接看托盘图标即可。")
+            messagebox.showinfo("wb-keylight", "已经在运行了 — 直接看托盘图标即可。")
             sys.exit(0)
         except OSError as e:
-            messagebox.showerror("rk98-keylight", f"服务启动失败:\n{e}")
+            messagebox.showerror("wb-keylight", f"服务启动失败:\n{e}")
             sys.exit(2)
         self.settings_win = None
         self.last_state = None
@@ -151,15 +149,17 @@ class App:
             pystray.MenuItem("测试: 运行中", lambda: self.ui_q.put(("test", "RUNNING"))),
             pystray.MenuItem("测试: 待确认", lambda: self.ui_q.put(("test", "WAITING"))),
             pystray.MenuItem("测试: 完成", lambda: self.ui_q.put(("test", "DONE"))),
+            pystray.MenuItem("演示: 分区(3 任务)", lambda: self.ui_q.put(("demo",))),
+            pystray.MenuItem("演示: 溢出(10 任务)", lambda: self.ui_q.put(("demo_overflow",))),
             pystray.MenuItem("恢复硬件灯效", lambda: self.ui_q.put(("restore",))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda: self.ui_q.put(("quit",))),
         )
-        self.tray = pystray.Icon("rk98-keylight", icon_for(self.svc.state),
-                                 "rk98-keylight", menu)
+        self.tray = pystray.Icon("wb-keylight", icon_for(self.svc.state),
+                                 "wb-keylight", menu)
         threading.Thread(target=self._run_tray, daemon=True).start()
         try:
-            self.tray.notify("rk98-keylight 已启动 — 左键托盘图标可设置",
+            self.tray.notify("wb-keylight 已启动 — 左键托盘图标可设置",
                              "运行中=彩色流水 / 待确认=红灯流水 / 完成=绿灯闪")
         except Exception:
             pass
@@ -190,7 +190,7 @@ class App:
                         pass
                     self.ui_q.put(("status",))
                 try:
-                    self.tray.title = "rk98-keylight · " + STATE_TEXT.get(st, st)
+                    self.tray.title = "wb-keylight · " + STATE_TEXT.get(st, st)
                 except Exception:
                     pass
                 self.ui_q.put(("status",))
@@ -221,6 +221,10 @@ class App:
         elif kind == "test":
             self.svc.paused = False
             self.svc.force_state(cmd[1])
+        elif kind == "demo":
+            self.svc.inject_demo(overflow=False, secs=30)
+        elif kind == "demo_overflow":
+            self.svc.inject_demo(overflow=True, secs=30)
         elif kind == "restore":
             self.svc.clear_sessions()
         elif kind == "quit":
@@ -260,7 +264,7 @@ class SettingsWindow:
     def __init__(self, app):
         self.app = app
         self.win = tk.Toplevel(app.root)
-        self.win.title("rk98-keylight 设置 — WorkBuddy × RK98")
+        self.win.title("wb-keylight 设置 — WorkBuddy × RK98")
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self._hide)
         cfg = app.svc.cfg
@@ -317,6 +321,46 @@ class SettingsWindow:
         self.v_done_off = tk.IntVar(value=int(cfg["done"].get("off_ms", 120)))
         ttk.Entry(f_done, textvariable=self.v_done_off, width=5).grid(row=0, column=8, **pad)
 
+        # ---- 分区模式(M4: 每排一任务) ----
+        f_part = ttk.LabelFrame(self.win, text="分区模式（每排一个任务 · numpad 溢出区）")
+        f_part.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
+        row += 1
+        self.v_part_on = tk.BooleanVar(
+            value=bool(cfg.get("partition", {}).get("enabled", True)))
+        ttk.Checkbutton(f_part, text="启用分区模式(每排一任务; 关闭则回到全局单状态灯效)",
+                        variable=self.v_part_on).grid(
+            row=0, column=0, columnspan=6, sticky="w", **pad)
+        ttk.Label(f_part, text="WorkBuddy 运行色:").grid(row=1, column=0, sticky="e", **pad)
+        self.v_src_wb = tk.StringVar(
+            value=cfg.get("sources", {}).get("workbuddy", {}).get("color", "#00E676"))
+        ttk.Entry(f_part, textvariable=self.v_src_wb, width=9).grid(row=1, column=1, **pad)
+        ttk.Button(f_part, text="…", width=3,
+                   command=lambda: self._pick(self.v_src_wb)).grid(row=1, column=2, **pad)
+        ttk.Label(f_part, text="Codex 运行色:").grid(row=1, column=3, sticky="e", **pad)
+        self.v_src_cx = tk.StringVar(
+            value=cfg.get("sources", {}).get("codex", {}).get("color", "#2979FF"))
+        ttk.Entry(f_part, textvariable=self.v_src_cx, width=9).grid(row=1, column=4, **pad)
+        ttk.Button(f_part, text="…", width=3,
+                   command=lambda: self._pick(self.v_src_cx)).grid(row=1, column=5, **pad)
+        ttk.Label(f_part, text="失败闪烁(秒):").grid(row=2, column=0, sticky="e", **pad)
+        self.v_fail_secs = tk.IntVar(
+            value=int(cfg.get("partition", {}).get("fail_flash_secs", 30)))
+        ttk.Spinbox(f_part, from_=5, to=120, width=5,
+                    textvariable=self.v_fail_secs).grid(row=2, column=1, sticky="w", **pad)
+        ttk.Label(f_part, text="等待 亮/灭(ms):").grid(row=2, column=3, sticky="e", **pad)
+        self.v_wait_on = tk.IntVar(
+            value=int(cfg.get("partition", {}).get("waiting_on_ms", 150)))
+        self.v_wait_off = tk.IntVar(
+            value=int(cfg.get("partition", {}).get("waiting_off_ms", 100)))
+        ttk.Entry(f_part, textvariable=self.v_wait_on, width=5).grid(row=2, column=4, **pad)
+        ttk.Entry(f_part, textvariable=self.v_wait_off, width=5).grid(row=2, column=5, **pad)
+        ttk.Button(f_part, text="演示分区(3 任务)", command=self._demo).grid(
+            row=3, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Button(f_part, text="演示溢出(10 任务)", command=self._demo_overflow).grid(
+            row=3, column=2, columnspan=2, sticky="w", **pad)
+        ttk.Label(f_part, text="演示任务 30 秒后自动绿闪收尾并停流; 键盘上看不到的文字身份见下方任务映射表",
+                  foreground="#8a6d3b").grid(row=4, column=0, columnspan=6, sticky="w", **pad)
+
         # ---- 服务 ----
         f_svc = ttk.LabelFrame(self.win, text="服务")
         f_svc.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
@@ -333,6 +377,20 @@ class SettingsWindow:
                         variable=self.v_autostart).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(f_svc, text="提示: 灯效控制需要 USB 有线连接；蓝牙/2.4G 模式下无法控制(键盘只暴露标准 HID 接口)",
                   foreground="#8a6d3b").grid(row=2, column=0, columnspan=6, sticky="w", **pad)
+
+        # ---- 任务映射表(分区模式: 键盘上显示不出的文字身份) ----
+        f_tasks = ttk.LabelFrame(self.win, text="任务映射表（每 0.5s 刷新）")
+        f_tasks.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
+        row += 1
+        self.task_tree = ttk.Treeview(
+            f_tasks, columns=("slot", "source", "state", "progress", "label"),
+            show="headings", height=5)
+        for c, txt, w in (("slot", "排", 44), ("source", "来源", 84),
+                          ("state", "状态", 72), ("progress", "进度", 56),
+                          ("label", "任务(cwd/消息)", 300)):
+            self.task_tree.heading(c, text=txt)
+            self.task_tree.column(c, width=w, anchor="w")
+        self.task_tree.grid(row=0, column=0, columnspan=6, sticky="we", **pad)
 
         # ---- 按钮 ----
         f_btn = ttk.Frame(self.win)
@@ -385,6 +443,12 @@ class SettingsWindow:
         self.app.svc.paused = False
         self.app.svc.force_state(state)
 
+    def _demo(self):
+        self.app.svc.inject_demo(overflow=False, secs=30)
+
+    def _demo_overflow(self):
+        self.app.svc.inject_demo(overflow=True, secs=30)
+
     def _restore(self):
         self.app.svc.clear_sessions()
 
@@ -392,20 +456,47 @@ class SettingsWindow:
         self.win.withdraw()
         self.app.settings_win = None
 
+    TASK_STATE_TEXT = {"RUNNING": "运行中", "WAITING": "待确认",
+                       "DONE": "完成", "FAIL": "失败"}
+    TASK_SOURCE_TEXT = {"workbuddy": "WorkBuddy", "codex": "Codex"}
+
     def refresh_status(self):
         svc = self.app.svc
         kb = "已连接" if svc.kb.dev is not None else "未连接"
         paused = " · 已暂停" if svc.paused else ""
-        run = len(svc.sessions)
-        wait = len(svc.waiting)
         extra = ""
-        if run > 1 or wait:
-            extra = " | 进行中 %d 个任务" % run
-            if wait:
-                extra += " · %d 个等你确认" % wait
+        snap = []
+        if svc.partition_on and svc.mgr is not None:
+            snap = svc.mgr.snapshot()
+            on_row = [t for t in snap if not t["overflow"]]
+            over = [t for t in snap if t["overflow"]]
+            nc = len([t for t in over if t["source"] == "codex"])
+            extra = " | 分区 %d/6 排" % len(on_row)
+            if over:
+                extra += " · 溢出 C%d/W%d" % (nc, len(over) - nc)
+        else:
+            run = len(svc.sessions)
+            wait = len(svc.waiting)
+            if run > 1 or wait:
+                extra = " | 进行中 %d 个任务" % run
+                if wait:
+                    extra += " · %d 个等你确认" % wait
         self.v_status.set("状态: %s%s | 键盘: %s%s | 累计帧: %d"
                           % (STATE_TEXT.get(svc.state, svc.state), paused, kb,
                              extra, svc.kb.frames_sent))
+        # 任务映射表
+        for r in self.task_tree.get_children():
+            self.task_tree.delete(r)
+        for t in snap:
+            slot = ("P%d" % (t["slot"] + 1)) if t["slot"] is not None else "溢出"
+            if t.get("progress"):
+                prog = "%d/%d" % (t["progress"][0], t["progress"][1])
+            else:
+                prog = "%d步" % t.get("steps", 0)
+            self.task_tree.insert("", "end", values=(
+                slot, self.TASK_SOURCE_TEXT.get(t["source"], t["source"]),
+                self.TASK_STATE_TEXT.get(t["state"], t["state"]),
+                prog, t.get("label", "")))
 
     def save(self):
         try:
@@ -432,6 +523,16 @@ class SettingsWindow:
                     "off_ms": int(self.v_done_off.get()),
                 },
                 "conflict": {"close_rk_app": bool(self.v_close_rk.get())},
+                "partition": {
+                    "enabled": bool(self.v_part_on.get()),
+                    "fail_flash_secs": int(self.v_fail_secs.get()),
+                    "waiting_on_ms": int(self.v_wait_on.get()),
+                    "waiting_off_ms": int(self.v_wait_off.get()),
+                },
+                "sources": {
+                    "workbuddy": {"color": self._norm_color(self.v_src_wb.get())},
+                    "codex": {"color": self._norm_color(self.v_src_cx.get())},
+                },
                 "service": {"stale_session_secs": int(self.v_stale.get())},
             }
         except Exception as e:

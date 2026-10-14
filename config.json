@@ -11,13 +11,6 @@
     "brightness": 0.8,
     "speed": 40
   },
-  "done": {
-    "color": "#00FF00",
-    "mode": "flash",
-    "times": 3,
-    "on_ms": 200,
-    "off_ms": 120
-  },
   "waiting": {
     "mode": "flow",
     "color": "#FF0000",
@@ -25,8 +18,38 @@
     "brightness": 0.8,
     "speed": 40
   },
+  "done": {
+    "color": "#00FF00",
+    "mode": "flash",
+    "times": 3,
+    "on_ms": 200,
+    "off_ms": 120
+  },
   "idle": {
     "mode": "hardware"
+  },
+  "partition": {
+    "enabled": true,
+    "fail_flash_secs": 30,
+    "waiting_on_ms": 150,
+    "waiting_off_ms": 100,
+    "speed": 40,
+    "fps": 30,
+    "brightness": 0.8,
+    "tail": 8
+  },
+  "sources": {
+    "workbuddy": {
+      "color": "#00E676"
+    },
+    "codex": {
+      "color": "#2979FF"
+    }
+  },
+  "codex": {
+    "enabled": true,
+    "sessions_dir": "~/.codex/sessions",
+    "poll_secs": 2
   },
   "conflict": {
     "close_rk_app": false

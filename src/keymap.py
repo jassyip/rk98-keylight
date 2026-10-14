@@ -41,3 +41,25 @@ assert len(set(VKEYS)) == 100, "duplicate key indices"
 
 GRID_W, GRID_H = 37, 11
 FRAME_BUF_SIZE = 425
+
+# ---- M4 分区模式: 行结构 ----
+# 按 VKEYS 排列顺序 + 键位注释显式定义。
+# 勿用网格坐标阈值推导: 第 1 排导航键(Del/Home/Insert/PageUp/PageDown)与 numpad
+# 同在右侧, 且第 2 排 Backspace 的网格 x=27 与 numpad 相邻 — 网格阈值会误杀主键
+# (此坑由 E2 探针实测发现, 见 probes/hw_probe.py)。
+ROW_SPANS = [(0, 19), (19, 33), (37, 51), (55, 68), (71, 84), (88, 98)]
+ROWS = [list(range(a, b)) for a, b in ROW_SPANS]  # 主键区 6 排: 19/14/14/13/13/10 键
+
+# numpad 17 键(各排末尾): NumLock Num/ Num* Num- | Num7..9 Num+ | Num4..6 |
+#                        Num1..3 NumEnter | Num0 Num.
+NUMPAD_KEYS = (list(range(33, 37)) + list(range(51, 55)) + [68, 69, 70]
+               + list(range(84, 88)) + [98, 99])
+# 按物理列分半: 左半 = col1(NumLock/7/4/1/0) + col2(//8/5/2/.) 共 10 键
+NUMPAD_LEFT = [33, 51, 68, 84, 98, 34, 52, 69, 85, 99]
+# 右半 = col3(*/9/6/3) + col4(-/+/Enter) 共 7 键
+NUMPAD_RIGHT = [35, 53, 70, 86, 36, 54, 87]
+
+assert [len(r) for r in ROWS] == [19, 14, 14, 13, 13, 10], "主键区排键数异常"
+assert len(NUMPAD_KEYS) == 17 and len(NUMPAD_LEFT) == 10 and len(NUMPAD_RIGHT) == 7
+assert sorted(sum(ROWS, []) + NUMPAD_KEYS) == list(range(100)), "100 键覆盖不完整"
+assert set(NUMPAD_LEFT) | set(NUMPAD_RIGHT) == set(NUMPAD_KEYS), "numpad 分半不完整"
