@@ -15,8 +15,10 @@ SRC = os.path.join(os.path.dirname(HERE), "src")
 sys.path.insert(0, SRC)
 
 from effects import (bfactor, flow_frame, hex_rgb, rainbow_frame,  # noqa: E402
-                     row_breathe_map, row_flow_map, row_phase, scale)
-from effects import _falloff  # noqa: E402
+                     row_breathe_map, row_flow_map, row_phase, scale,
+                     sine_frame, solid_colors, stars_frame, stars_map,
+                     wave_frame)
+from effects import _falloff, _star_k, lit_row_wave_map  # noqa: E402
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS, VPOSITIONS  # noqa: E402
 from partition import PartitionManager  # noqa: E402
 
@@ -486,6 +488,158 @@ class TestFlowSmoothing(unittest.TestCase):
             d = abs(((x - 12.0) % 44 + 22) % 44 - 22)
             if d > 8:
                 self.assertEqual(colors[i], ZERO)             # 尾迹外全暗(含彩虹)
+
+
+class TestOfficialEffects(unittest.TestCase):
+    """RK 官方驱动效果移植(tc_led_mode 清单): 正弦光波/繁星点点/随波逐流/常亮"""
+
+    FULL = hex_rgb("#2979FF")
+
+    @staticmethod
+    def _is_scale_of(c, base):
+        """c 是否为 base 的等比缩放(含 ZERO; 容忍 round 误差 ±1)"""
+        if c == ZERO:
+            return True
+        k = max(c) / max(base)
+        return all(abs(ch - round(b * k)) <= 1 for ch, b in zip(c, base))
+
+    # ---------- 正弦光波 ----------
+    def test_sine_smooth_gradient(self):
+        # 正弦波观感 = 全列连续渐变(非二值): 同一帧里亮度档位多,
+        # 且相邻列跳变平缓(正弦关于波峰对称, 档位数天然折叠到 ~13)
+        colors = sine_frame(self.FULL, 0.0, speed=30.0)
+        levels = {c for c in colors if c != ZERO}
+        self.assertGreaterEqual(len(levels), 12, "亮度档位太少, 不像正弦渐变")
+        by_x = {}
+        for i, (x, _y) in enumerate(VPOSITIONS):
+            by_x[x] = max(colors[i]) / 255.0
+        # 只比对真正相邻的列(b=a+1); 缺列(29/31/33/35 无键)处的间隔是布局
+        # 固有, 不算跳变
+        jumps = [abs(by_x[a + 1] - by_x[a]) for a in sorted(by_x) if a + 1 in by_x]
+        self.assertLessEqual(max(jumps), 0.20, "相邻列跳变过大: %s" % jumps)
+
+    def test_sine_bounded_and_travels(self):
+        for t in (0.0, 0.37, 1.2):
+            colors = sine_frame(self.FULL, t, speed=30.0)
+            for c in colors:                       # 不亮过源色, 且是源色等比缩放
+                self.assertTrue(all(a <= b for a, b in zip(c, self.FULL)))
+                self.assertTrue(self._is_scale_of(c, self.FULL), c)
+        self.assertNotEqual(sine_frame(self.FULL, 0.0, speed=30.0),
+                            sine_frame(self.FULL, 0.5, speed=30.0))
+
+    def test_sine_crest_is_full(self):
+        # 波峰处亮度 = 源色满值
+        colors = sine_frame(self.FULL, 0.0, speed=0.0, period=24.0)
+        self.assertIn(self.FULL, colors)
+
+    # ---------- 繁星点点 ----------
+    def test_stars_deterministic(self):
+        # 相位由键索引决定(无全局 RNG): 同一 t 帧可复现
+        self.assertEqual(stars_frame(self.FULL, 1.23),
+                         stars_frame(self.FULL, 1.23))
+
+    def test_stars_twinkle_over_time(self):
+        # 扫一段时间, 整体亮键数有明显起伏(星星在眨)
+        lit_series = [sum(1 for c in stars_frame(self.FULL, t * 0.05)
+                          if c != ZERO) for t in range(40)]
+        self.assertGreater(max(lit_series), 10)
+        self.assertLess(min(lit_series), 90)
+        self.assertGreater(max(lit_series) - min(lit_series), 3)
+
+    def test_star_k_range(self):
+        for i in (0, 7, 33, 99):
+            for t in (0.0, 0.31, 1.77):
+                k = _star_k(i, t)
+                self.assertGreaterEqual(k, 0.0)
+                self.assertLessEqual(k, 1.0)
+
+    def test_stars_map_lit_subset(self):
+        keys = ROWS[0]
+        lit = set(keys[:5])
+        m = stars_map(keys, self.FULL, 1.0, lit=lit)
+        for i in keys:
+            if i in lit:                            # 亮格内: 源色等比缩放(含暗中)
+                self.assertTrue(self._is_scale_of(m[i], self.FULL), m[i])
+            else:                                   # 亮格外: 全暗
+                self.assertEqual(m[i], ZERO)
+
+    # ---------- 随波逐流 ----------
+    def test_wave_rows_out_of_phase(self):
+        # 同一时刻不同排的亮键分布不同(错峰), 且全帧 100 键
+        colors = wave_frame(self.FULL, 1.0, speed=30.0)
+        self.assertEqual(len(colors), 100)
+        rows = [set(i for i in keys if colors[i] != ZERO) for keys in ROWS]
+        self.assertTrue(any(rows[i] != rows[j]
+                            for i in range(len(rows)) for j in range(i + 1, len(rows))),
+                        "所有排同相位, 没有错峰")
+
+    def test_wave_colors_are_source_scaled(self):
+        colors = wave_frame(self.FULL, 0.7, speed=30.0)
+        for c in colors:
+            self.assertTrue(self._is_scale_of(c, self.FULL), c)
+
+    def test_lit_row_wave_offset_shifts_phase(self):
+        keys = ROWS[0]
+        m0 = lit_row_wave_map(keys, self.FULL, 1.0, 30.0, 8.0, 0.0)
+        m1 = lit_row_wave_map(keys, self.FULL, 1.0, 30.0, 8.0, 5.0)
+        self.assertNotEqual(m0, m1)                            # 错峰量改变波形
+
+    # ---------- 常亮 ----------
+    def test_solid(self):
+        self.assertEqual(solid_colors(self.FULL), [self.FULL] * 100)
+
+    # ---------- 分区 compose 分支 ----------
+    def test_partition_effect_stars(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["effect"] = "stars"
+        m = PartitionManager(cfg)
+        m.signal("workbuddy", "a", "START")
+        colors = m.compose_frame(now=1.5)
+        nz = nonzero_keys(colors) & set(ROWS[0])
+        self.assertTrue(nz, "stars 效果下任务排应有亮键")
+
+    def test_partition_effect_wave(self):
+        # 波以 40 列/秒扫过各排(排宽不同, 到达时间不同) — 扫一段时间,
+        # 两个任务排都应有各自被点亮的时刻
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["effect"] = "wave"
+        m = PartitionManager(cfg)
+        m.signal("codex", "x", "START")
+        m.signal("workbuddy", "y", "START")
+        hit = {0: False, 1: False}
+        for k in range(120):
+            colors = m.compose_frame(now=k * 0.05)
+            if nonzero_keys(colors) & set(ROWS[0]):
+                hit[0] = True
+            if nonzero_keys(colors) & set(ROWS[1]):
+                hit[1] = True
+        self.assertTrue(all(hit.values()), "wave 效果下应扫过两个任务排: %s" % hit)
+
+    def test_partition_unknown_effect_falls_back(self):
+        # 未知 effect 回落 flow 不炸
+        cfg = copy.deepcopy(CFG)
+        cfg["partition"]["effect"] = "nonexistent"
+        m = PartitionManager(cfg)
+        m.signal("workbuddy", "a", "START")
+        colors = m.compose_frame(now=1.0)
+        self.assertTrue(nonzero_keys(colors) & set(ROWS[0]))
+
+
+class TestTimerResolution(unittest.TestCase):
+    """Windows 定时器精度: timeBeginPeriod(1) 修复 sleep 粒度掉帧"""
+
+    def test_raise_and_restore(self):
+        import os
+        if os.name != "nt":
+            self.skipTest("非 Windows")
+        from rk98 import (_timer_raised, raise_timer_resolution,
+                          restore_timer_resolution)
+        first = raise_timer_resolution()
+        second = raise_timer_resolution()      # 幂等: 已提升则返回 False
+        self.assertTrue(first)
+        self.assertFalse(second)
+        restore_timer_resolution()
+        self.assertFalse(_timer_raised)
 
 
 if __name__ == "__main__":

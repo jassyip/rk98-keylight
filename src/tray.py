@@ -39,11 +39,19 @@ STARTUP_CMD = os.path.join(STARTUP_DIR, "wb-keylight.cmd")
 PYTHONW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
 TRAY_SCRIPT = os.path.abspath(__file__)
 
-MODE_LABELS = {"rainbow": "彩色流水", "flow": "单色流水", "breathe": "呼吸"}
+# 运行中效果: 名称对齐 RK 官方驱动 Text/sc/text.xml(tc_led_mode 清单),
+# 帧观感按官方驱动移植(平滑曲线 + 官方档位速度)
+MODE_LABELS = {"flow": "流光", "rainbow": "流光溢彩", "breathe": "呼吸",
+               "solid": "常亮", "wave": "随波逐流", "stars": "繁星点点",
+               "sine": "正弦光波"}
 LABEL_MODES = {v: k for k, v in MODE_LABELS.items()}
-# 分区模式运行效果: 颜色=来源已定, 只有动画模式可选(流水/呼吸)
-PART_EFFECT_LABELS = {"flow": "流水", "breathe": "呼吸"}
+# 分区模式运行效果: 颜色=来源已定, 只有动画模式可选(官方名)
+PART_EFFECT_LABELS = {"flow": "流水", "breathe": "呼吸",
+                      "stars": "繁星点点", "wave": "随波逐流"}
 PART_LABEL_EFFECTS = {v: k for k, v in PART_EFFECT_LABELS.items()}
+# 官方驱动速度档位实测观感(KB.ini LedOpt 第 2 位=可调速度): 慢档循环一周≈4s/
+# 中档≈2s/快档≈1s -> 列坐标(37 列+8 尾迹, span 53)≈13/26/53 列每秒
+OFFICIAL_SPEED_HINT = "官方档位参考: 慢≈13 · 中≈26 · 快≈53 列/秒"
 
 STATE_TEXT = {
     "IDLE": "平常 · 键盘自带灯效",
@@ -309,16 +317,18 @@ class SettingsWindow:
         f_run.grid(row=row, column=0, columnspan=3, sticky="we", **pad)
         row += 1
         ttk.Label(f_run, text="效果:").grid(row=0, column=0, sticky="e", **pad)
-        self.v_run_mode = tk.StringVar(value=MODE_LABELS.get(cfg["running"].get("mode", "rainbow"), "彩色流水"))
+        self.v_run_mode = tk.StringVar(value=MODE_LABELS.get(cfg["running"].get("mode", "flow"), "流光"))
         ttk.Combobox(f_run, textvariable=self.v_run_mode, state="readonly", width=10,
                      values=list(MODE_LABELS.values())).grid(row=0, column=1, sticky="w", **pad)
-        ttk.Label(f_run, text="颜色(单色流水/呼吸时用):").grid(row=0, column=2, sticky="e", **pad)
+        ttk.Label(f_run, text="颜色(单色效果时用):").grid(row=0, column=2, sticky="e", **pad)
         self.v_run_color = tk.StringVar(value=cfg["running"].get("color", "#FF0000"))
         ttk.Entry(f_run, textvariable=self.v_run_color, width=9).grid(row=0, column=3, **pad)
         ttk.Button(f_run, text="…", width=3,
                    command=lambda: self._pick(self.v_run_color)).grid(row=0, column=4, **pad)
         self._slider(f_run, 1, "速度", cfg["running"].get("speed", 30), 5, 120, "v_run_speed")
-        self._slider(f_run, 2, "帧率", cfg["running"].get("fps", 30), 10, 60, "v_run_fps")
+        ttk.Label(f_run, text=OFFICIAL_SPEED_HINT, foreground="#808080").grid(
+            row=1, column=2, columnspan=3, sticky="w")
+        self._slider(f_run, 2, "帧率", cfg["running"].get("fps", 45), 10, 60, "v_run_fps")
         self._slider(f_run, 3, "亮度", cfg["running"].get("brightness", 100), 5, 100, "v_run_bri")
 
         # ---- 待确认(颜色/亮度两种模式共用: 分区红闪也用这俩) ----
@@ -392,7 +402,8 @@ class SettingsWindow:
             value=int(cfg.get("partition", {}).get("waiting_off_ms", 100)))
         ttk.Entry(part_body, textvariable=self.v_wait_on, width=5).grid(row=1, column=4, **pad)
         ttk.Entry(part_body, textvariable=self.v_wait_off, width=5).grid(row=1, column=5, **pad)
-        # 效果/速度/帧率/亮度 — 与全局"运行中"同规格(2026-10-14 用户要求)
+        # 效果/速度/帧率/亮度 — 与全局"运行中"同规格(2026-10-14 用户要求;
+        # 效果名对齐 RK 官方驱动 tc_led_mode 清单, 2026-10-19)
         pcfg0 = cfg.get("partition", {})
         ttk.Label(part_body, text="效果:").grid(row=2, column=0, sticky="e", **pad)
         self.v_part_effect = tk.StringVar(
@@ -401,8 +412,10 @@ class SettingsWindow:
                      width=8, values=list(PART_EFFECT_LABELS.values())).grid(
             row=2, column=1, sticky="w", **pad)
         self._cslider(part_body, 2, 2, "速度", pcfg0.get("speed", 30), 5, 120, "v_part_speed")
-        self._cslider(part_body, 3, 0, "帧率", pcfg0.get("fps", 30), 10, 60, "v_part_fps")
+        self._cslider(part_body, 3, 0, "帧率", pcfg0.get("fps", 45), 10, 60, "v_part_fps")
         self._cslider(part_body, 3, 3, "亮度", pcfg0.get("brightness", 100), 5, 100, "v_part_bri")
+        ttk.Label(part_body, text=OFFICIAL_SPEED_HINT, foreground="#808080").grid(
+            row=3, column=6, columnspan=2, sticky="w")
         ttk.Button(part_body, text="演示分区(3 任务)", width=15, command=self._demo).grid(
             row=4, column=0, columnspan=2, sticky="w", **pad)
         ttk.Button(part_body, text="演示溢出(10 任务)", width=15, command=self._demo_overflow).grid(

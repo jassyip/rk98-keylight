@@ -30,9 +30,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rk98 import RK98, RK98Error, kill_rk_app, rk_app_running  # noqa: E402
+from rk98 import (RK98, RK98Error, kill_rk_app, raise_timer_resolution,  # noqa: E402
+                  restore_timer_resolution, rk_app_running)
 from effects import (bfactor, hex_rgb, scale, solid_colors, flow_frame,  # noqa: E402
-                     rainbow_frame, breathe_frame)
+                     rainbow_frame, breathe_frame, sine_frame, stars_frame,
+                     wave_frame)
 from partition import PartitionManager  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -617,9 +619,9 @@ class Renderer(threading.Thread):
     def render_running(self):
         svc, cfg = self.svc, self.svc.cfg["running"]
         rgb = scale(hex_rgb(cfg["color"]), bfactor(cfg.get("brightness", 100)))
-        fps = max(float(cfg.get("fps", 30)), 1)
+        fps = max(float(cfg.get("fps", 45)), 1)
         interval = 1.0 / fps
-        speed = float(cfg.get("speed", 40))
+        speed = float(cfg.get("speed", 30))
         mode = cfg.get("mode", "rainbow")
         epoch = svc.epoch
         t0 = time.time()
@@ -629,6 +631,14 @@ class Renderer(threading.Thread):
                 colors = rainbow_frame((t * speed) % 44 - 4)
             elif mode == "breathe":
                 colors = breathe_frame(rgb, t)
+            elif mode == "solid":
+                colors = solid_colors(rgb)
+            elif mode == "wave":
+                colors = wave_frame(rgb, t, speed)
+            elif mode == "stars":
+                colors = stars_frame(rgb, t)
+            elif mode == "sine":
+                colors = sine_frame(rgb, t, speed)
             else:
                 colors = flow_frame(rgb, (t * speed) % 44 - 4)
             if not svc.kb_send(colors):
@@ -842,6 +852,8 @@ def start_service(cfg):
     port = int(cfg["service"].get("port", 18990))
     if _port_busy(port):
         raise ServiceAlreadyRunning(port)
+    if raise_timer_resolution():
+        log.info("Windows 定时器精度已提升到 1ms(修复 sleep 粒度导致的掉帧)")
     svc = Service(cfg)
     Handler.service = svc
     svc.kb_ensure()
@@ -876,10 +888,12 @@ def run_service(cfg):
         if svc.httpd:
             svc.httpd.shutdown()
         svc.kb.close()
+        restore_timer_resolution()
 
 
 def run_test(cfg, state, secs):
     """手动触发一个状态, 用于调试（不经过事件）"""
+    raise_timer_resolution()
     svc = Service(cfg)
     if not svc.kb_ensure():
         log.error("键盘连接失败")
@@ -893,6 +907,7 @@ def run_test(cfg, state, secs):
     svc.stop_event.set()
     time.sleep(0.3)
     svc.kb.close()
+    restore_timer_resolution()
     log.info("test 结束: state=%s secs=%s frames=%d", state, secs, svc.kb.frames_sent)
 
 

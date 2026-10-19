@@ -1,7 +1,7 @@
 """灯效帧生成 — 每帧返回 100 个 (r,g,b)（顺序对应 keymap.VKEYS）"""
 import math
 
-from keymap import VPOSITIONS
+from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS, VPOSITIONS
 
 GRID_PERIOD = 44  # 相位循环: 37 列 + 前后各留 4 列尾部
 
@@ -149,3 +149,73 @@ def row_breathe_map(keys, rgb, t, period=2.0, lit_count=None):
     lit_count = max(0, min(len(keys), int(lit_count)))
     ordered = sorted(keys, key=lambda i: VPOSITIONS[i][0])
     return {i: c for i in ordered[:lit_count]}
+
+
+# ---- 官方效果帧函数(RK 官方驱动 Text/sc/text.xml tc_led_mode 观感移植) ----
+
+def _star_k(i, t):
+    """繁星点点单键包络: 相位/频率由键索引确定(无全局 RNG, 帧间连续),
+    脉冲三次方收尖 -> 短促闪亮, 像星星眨眼。"""
+    ph = (i * 0.6180339887498949) % 1.0
+    rate = 0.35 + ((i * 2654435761) % 1000) / 1000.0 * 0.9
+    k = 0.5 - 0.5 * math.cos(2 * math.pi * ((t * rate + ph) % 1.0))
+    return k * k * k
+
+
+def stars_frame(rgb, t):
+    """繁星点点(全局): 全键盘 100 键各自错峰眨眼, 亮度包络确定性连续。"""
+    return [scale(rgb, _star_k(i, t)) for i in range(100)]
+
+
+def stars_map(keys, rgb, t, lit=None):
+    """繁星点点(排级): 只点亮 keys(或其中的 lit 子集), 其余暗。"""
+    out = {}
+    for i in keys:
+        if lit is not None and i not in lit:
+            out[i] = (0, 0, 0)
+            continue
+        k = _star_k(i, t)
+        out[i] = scale(rgb, k) if k > 0.0 else (0, 0, 0)
+    return out
+
+
+def sine_frame(rgb, t, speed=30.0, period=24.0):
+    """正弦光波(全局): 亮度 = 0.5+0.5sin(2pi(x-speed*t)/period)。
+
+    与流水的区别: 没有暗区, 全键盘软明软暗, 波峰波谷过渡都是正弦的。
+    同列键共享亮度(按 x 缓存)。
+    """
+    cache = {}
+    out = []
+    for (x, _y) in VPOSITIONS:
+        c = cache.get(x)
+        if c is None:
+            k = 0.5 + 0.5 * math.sin(2 * math.pi * (x - speed * t) / period)
+            c = scale(rgb, k)
+            cache[x] = c
+        out.append(c)
+    return out
+
+
+def wave_frame(rgb, t, speed=30.0, tail=8.0, stagger=6.0):
+    """随波逐流(全局): 6 排 + numpad 两半区各自错峰跑同一条平滑流水,
+    观感 = 波浪沿对角线扫过整个键盘。"""
+    colors = {}
+    for gi, keys in enumerate(list(ROWS) + [NUMPAD_LEFT, NUMPAD_RIGHT]):
+        phase = row_phase(t, speed, keys, tail) + gi * stagger
+        colors.update(row_flow_map(keys, rgb, phase, tail))
+    return [colors[i] for i in range(100)]
+
+
+def lit_row_wave_map(keys, rgb, t, speed, tail, wave_off, lit=None):
+    """排内错峰流水(随波逐流的排级版): 波前相位 += wave_off。
+
+    wave_off 由排号决定(分区模式下 6 个任务槽各错半波), 多任务同时跑时
+    观感为波浪在任务排之间此起彼伏, 而不是整排齐步走。lit 语义同
+    lit_row_flow_map。
+    """
+    phase = row_phase(t, speed, keys, tail) + wave_off
+    base = row_flow_map(keys, rgb, phase, tail)
+    if lit is None:
+        return base
+    return {i: (c if i in lit else (0, 0, 0)) for i, c in base.items()}

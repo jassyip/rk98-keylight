@@ -15,8 +15,9 @@ import logging
 import threading
 import time
 
-from effects import (bfactor, hex_rgb, lit_row_flow_map, row_breathe_map,  # noqa: E402
-                     row_phase, scale)
+from effects import (bfactor, hex_rgb, lit_row_flow_map,  # noqa: E402
+                     lit_row_wave_map, row_breathe_map, row_phase, scale,
+                     stars_map)
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS
 
 log = logging.getLogger("keylight")
@@ -264,7 +265,9 @@ class PartitionManager:
             for t in list(self.tasks.values()):
                 if t.slot is None:
                     continue
-                self._paint(colors, ROWS[t.slot], t, now, pcfg)
+                # wave_off: 排号错峰(随波逐流), 每排晚半个波起步
+                self._paint(colors, ROWS[t.slot], t, now, pcfg,
+                            wave_off=t.slot * 5.0)
             # 溢出半区: 颗数 = 溢出任务数; 动画取半区内最高优先级任务
             for source, keys in (("codex", NUMPAD_LEFT), ("workbuddy", NUMPAD_RIGHT)):
                 group = [t for t in self.tasks.values()
@@ -273,10 +276,11 @@ class PartitionManager:
                     continue
                 top = max(group, key=lambda t: PRIO.get(t.state, 0))
                 lit = keys[:min(len(group), len(keys))]
-                self._paint(colors, lit, top, now, pcfg)
+                self._paint(colors, lit, top, now, pcfg,
+                            wave_off=30.0 if source == "codex" else 35.0)
         return colors
 
-    def _paint(self, colors, keys, t, now, pcfg):
+    def _paint(self, colors, keys, t, now, pcfg, wave_off=0.0):
         if t.state in ("WAITING", "FAIL"):
             # 红闪: 整排同相位(绝对时间相位天然同步所有等待排)
             w = self.cfg.get("waiting", {})
@@ -306,19 +310,24 @@ class PartitionManager:
             return
 
         # RUNNING: 来源色排内动画(有进度则只亮已完成的格)
-        # effect=flow 流水(波前扫描) / breathe 呼吸(整排渐明渐暗), 面板可切
+        # effect=flow 流水 / breathe 呼吸 / stars 繁星点点 / wave 随波逐流(排间错峰)
         src = self.cfg.get("sources", {}).get(t.source, {})
         rgb = scale(hex_rgb(src.get("color", SOURCE_COLORS.get(t.source, "#FFFFFF"))),
                     bfactor(pcfg.get("brightness", 100)))
-        speed = float(pcfg.get("speed", 40))
+        speed = float(pcfg.get("speed", 30))
         tail = float(pcfg.get("tail", 8.0))
         lit = None
         if t.progress and t.progress[1] > 0:
             frac = max(0.0, min(1.0, t.progress[0] / float(t.progress[1])))
             lit = int(round(len(keys) * frac))
-        if str(pcfg.get("effect", "flow")) == "breathe":
+        effect = str(pcfg.get("effect", "flow"))
+        if effect == "breathe":
             m = row_breathe_map(keys, rgb, now,
                                 float(pcfg.get("breathe_period", 2.0)), lit)
+        elif effect == "stars":
+            m = stars_map(keys, rgb, now, lit)
+        elif effect == "wave":
+            m = lit_row_wave_map(keys, rgb, now, speed, tail, wave_off, lit)
         else:
             phase = row_phase(now, speed, keys, tail)
             m = lit_row_flow_map(keys, rgb, phase, tail, lit)

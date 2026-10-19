@@ -6,6 +6,8 @@
   注意: 该接口没有任何 Output 报表, 用 write() 发 Output 会被 Windows 静默丢弃
 - 每帧 8 个报表: init(zone1) + stream(zone2..6) + commit(zone6,7)
 """
+import ctypes
+import os
 import subprocess
 import time
 
@@ -21,6 +23,39 @@ REPORT_ID = 0x0A
 REPORT_LEN = 65
 CHUNK = 62
 RK_APP_PROCESS = "DeviceDriver.exe"
+
+# ---- Windows 定时器精度 ----
+# Windows 默认定时器精度 15.6ms: time.sleep(0.001) 实测睡 15.33ms。
+# send_frame 每帧 8 个报表各带 1ms 间隔 -> 每帧白睡 ~123ms, 帧率被拖到
+# ~11fps(实测), 再平滑的衰减曲线也看不出来。timeBeginPeriod(1) 后
+# sleep(1ms) 实测 1.5ms, 同样代码帧率恢复到 ~30fps+。
+_timer_raised = False
+
+
+def raise_timer_resolution():
+    """提升 Windows 定时器精度到 1ms; 非 Windows 平台或失败时静默跳过。"""
+    global _timer_raised
+    if _timer_raised or os.name != "nt":
+        return False
+    try:
+        if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+            _timer_raised = True
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def restore_timer_resolution():
+    """恢复系统定时器精度(服务退出时调用)。"""
+    global _timer_raised
+    if not _timer_raised:
+        return
+    _timer_raised = False
+    try:
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
 
 
 class RK98Error(Exception):

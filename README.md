@@ -174,10 +174,10 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 
 | 分组 | 项 |
 | --- | --- |
-| 运行中（仅全局模式） | 效果（彩色流水/单色流水/呼吸）、颜色、速度、帧率、亮度 |
+| 运行中（仅全局模式） | 效果（RK 官方驱动效果名：流光/流光溢彩/呼吸/常亮/随波逐流/繁星点点/正弦光波）、颜色、速度、帧率、亮度 |
 | 待确认（两模式共用） | 颜色、速度、帧率、亮度 |
 | 完成（两模式共用） | 颜色、闪烁次数、亮 ms、灭 ms |
-| 分区模式（勾选后生效） | 效果（流水/呼吸）、速度、帧率、亮度、来源色 |
+| 分区模式（勾选后生效） | 效果（流水/呼吸/繁星点点/随波逐流）、速度、帧率、亮度、来源色 |
 | 服务 | 僵死会话清理秒数、RK 官方软件抢占时是否让位、开机自启开关 |
 | 按钮 | 保存并应用 / 确认并关闭 / 测试三种效果 / 恢复硬件灯效 |
 
@@ -189,7 +189,7 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `running.mode` | `rainbow` | `rainbow` 彩色流水 / `flow` 单色流水 / `breathe` 呼吸 |
+| `running.mode` | `flow` | 效果名对齐 RK 官方驱动：`flow` 流光 / `rainbow` 流光溢彩 / `breathe` 呼吸 / `solid` 常亮 / `wave` 随波逐流 / `stars` 繁星点点 / `sine` 正弦光波 |
 | `running.color` | `#FF0000` | 单色流水/呼吸用的颜色 |
 | `running.fps` / `speed` / `brightness` | 45 / 30 / 100 | 帧率上限 / 波速(列每秒, RK 官方中档≈30) / 亮度(0-100 百分比) |
 | `waiting.mode` / `color` | `flow` / `#FF0000` | 待确认：红灯流水 |
@@ -197,7 +197,7 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 | `done.color` / `times` / `on_ms` / `off_ms` | `#00FF00` / 3 / 200 / 120 | 完成绿灯闪烁 |
 | `idle.mode` | `hardware` | 平常＝停流，交还自带灯效 |
 | `partition.enabled` | `true` | 分区模式总开关（关 = 全局单状态模式） |
-| `partition.effect` | `flow` | 分区运行中效果：`flow` 流水 / `breathe` 呼吸 |
+| `partition.effect` | `flow` | 分区运行中效果：`flow` 流水 / `breathe` 呼吸 / `stars` 繁星点点 / `wave` 随波逐流（排间错峰） |
 | `partition.speed` / `fps` / `brightness` | 30 / 45 / 100 | 与全局同规格（波速 / 帧率 / 亮度 0-100） |
 | `partition.breathe_period` | `2.0` | 分区呼吸效果周期（秒） |
 | `partition.waiting_on_ms` / `waiting_off_ms` | 150 / 100 | 待确认红闪的亮/灭时长 |
