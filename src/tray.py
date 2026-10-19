@@ -317,7 +317,7 @@ class SettingsWindow:
         ttk.Entry(f_run, textvariable=self.v_run_color, width=9).grid(row=0, column=3, **pad)
         ttk.Button(f_run, text="…", width=3,
                    command=lambda: self._pick(self.v_run_color)).grid(row=0, column=4, **pad)
-        self._slider(f_run, 1, "速度", cfg["running"].get("speed", 40), 5, 120, "v_run_speed")
+        self._slider(f_run, 1, "速度", cfg["running"].get("speed", 30), 5, 120, "v_run_speed")
         self._slider(f_run, 2, "帧率", cfg["running"].get("fps", 30), 10, 60, "v_run_fps")
         self._slider(f_run, 3, "亮度", cfg["running"].get("brightness", 100), 5, 100, "v_run_bri")
 
@@ -330,7 +330,7 @@ class SettingsWindow:
         ttk.Entry(f_wait, textvariable=self.v_wait_color, width=9).grid(row=0, column=1, **pad)
         ttk.Button(f_wait, text="…", width=3,
                    command=lambda: self._pick(self.v_wait_color)).grid(row=0, column=2, **pad)
-        self._slider(f_wait, 1, "速度", cfg["waiting"].get("speed", 40), 5, 120, "v_wait_speed")
+        self._slider(f_wait, 1, "速度", cfg["waiting"].get("speed", 30), 5, 120, "v_wait_speed")
         self._slider(f_wait, 2, "帧率", cfg["waiting"].get("fps", 30), 10, 60, "v_wait_fps")
         self._slider(f_wait, 3, "亮度", cfg["waiting"].get("brightness", 100), 5, 100, "v_wait_bri")
 
@@ -400,7 +400,7 @@ class SettingsWindow:
         ttk.Combobox(part_body, textvariable=self.v_part_effect, state="readonly",
                      width=8, values=list(PART_EFFECT_LABELS.values())).grid(
             row=2, column=1, sticky="w", **pad)
-        self._cslider(part_body, 2, 2, "速度", pcfg0.get("speed", 40), 5, 120, "v_part_speed")
+        self._cslider(part_body, 2, 2, "速度", pcfg0.get("speed", 30), 5, 120, "v_part_speed")
         self._cslider(part_body, 3, 0, "帧率", pcfg0.get("fps", 30), 10, 60, "v_part_fps")
         self._cslider(part_body, 3, 3, "亮度", pcfg0.get("brightness", 100), 5, 100, "v_part_bri")
         ttk.Button(part_body, text="演示分区(3 任务)", width=15, command=self._demo).grid(

@@ -4,6 +4,7 @@
   python tests/test_partition.py
 """
 import copy
+import math
 import os
 import sys
 import time
@@ -13,8 +14,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
 sys.path.insert(0, SRC)
 
-from effects import (bfactor, hex_rgb, row_breathe_map, row_flow_map,  # noqa: E402
-                     row_phase, scale)
+from effects import (bfactor, flow_frame, hex_rgb, rainbow_frame,  # noqa: E402
+                     row_breathe_map, row_flow_map, row_phase, scale)
+from effects import _falloff  # noqa: E402
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS, VPOSITIONS  # noqa: E402
 from partition import PartitionManager  # noqa: E402
 
@@ -411,6 +413,79 @@ class TestBrightnessAndEffects(unittest.TestCase):
         import keylight
         for sec in ("running", "waiting", "partition"):
             self.assertEqual(keylight.DEFAULTS[sec]["brightness"], 100)
+
+
+class TestFlowSmoothing(unittest.TestCase):
+    """流水衰减曲线平滑化(参考 RK98 官方驱动 KB.ini 流水观感)的离线验证。
+
+    RK 官方驱动(RK98-100KRGB, Dev/00C1/KB.ini LedOpt)的流水是软波前+平滑
+    拖尾; 本项目早期用线性衰减 1-|x-phase|/tail, 波前硬切、相邻键等差跳变,
+    观感生硬。2026-10-19 换成余弦平滑 _falloff = 0.5-0.5cos(pi*u)。
+    """
+
+    def test_falloff_endpoints_and_midpoint(self):
+        self.assertEqual(_falloff(1.0), 1.0)                  # 波前满色
+        self.assertEqual(_falloff(0.0), 0.0)                  # 尾迹外全暗
+        self.assertAlmostEqual(_falloff(0.5), 0.5, delta=1e-9)  # 中点半亮
+        self.assertAlmostEqual(_falloff(0.9), 0.5 + 0.5 * math.cos(0.1 * math.pi),
+                               delta=1e-9)                    # ≈0.9755, 线性只有 0.9
+
+    def test_falloff_monotonic(self):
+        prev = -1.0
+        for i in range(101):
+            u = i / 100.0
+            k = _falloff(u)
+            self.assertGreaterEqual(k, prev - 1e-12)
+            prev = k
+
+    def test_falloff_soft_edges(self):
+        # 平滑的意义: 两端变化率 < 中点(线性衰减全程等差)
+        end_step = _falloff(1.0) - _falloff(0.99)             # 亮端每 1% 的变化
+        mid_step = _falloff(0.50) - _falloff(0.49)            # 中点每 1% 的变化
+        self.assertLess(end_step, mid_step)
+        dark_step = _falloff(0.01) - _falloff(0.00)           # 暗端同样更缓
+        self.assertLess(dark_step, mid_step)
+
+    def test_flow_frame_column_cache_consistency(self):
+        # 同列(x 相同)按键必须同色 —— 列缓存正确性
+        colors = flow_frame((0, 200, 255), 12.0)
+        by_x = {}
+        for i, (x, _y) in enumerate(VPOSITIONS):
+            by_x.setdefault(x, colors[i])
+        for i, (x, _y) in enumerate(VPOSITIONS):
+            self.assertEqual(colors[i], by_x[x])
+
+    def test_flow_frame_smooth_no_hard_jump(self):
+        # 相邻列亮度跳变 <= 20% (线性衰减在波前附近是每格 12.5% 等差,
+        # 但波前内外沿是 100%->87.5% 的硬切; 余弦最大格间差 ≈ 0.197)
+        colors = flow_frame((255, 255, 255), 12.0)
+        xs = sorted({x for x, _ in VPOSITIONS})
+        by_x = {}
+        for i, (x, _y) in enumerate(VPOSITIONS):
+            by_x[x] = colors[i][0]
+        for a, b in zip(xs, xs[1:]):
+            self.assertLessEqual(abs(by_x[a] - by_x[b]), 0.21 * 255)
+
+    def test_row_flow_map_smooth_peak_and_tail(self):
+        keys = ROWS[0]
+        phase = VPOSITIONS[keys[4]][0]
+        m = row_flow_map(keys, (0, 255, 0), phase)
+        self.assertEqual(m[keys[4]], (0, 255, 0))             # 波前仍精确满色
+        far = [k for k in keys if abs(VPOSITIONS[k][0] - phase) > 8]
+        for k in far:
+            self.assertEqual(m[k], ZERO)                      # 尾迹外仍精确全暗
+        # 波前右侧(拖尾方向)相邻格平滑递减
+        right = sorted([k for k in keys if 0 < VPOSITIONS[k][0] - phase <= 3],
+                       key=lambda k: VPOSITIONS[k][0])
+        vals = [m[k][1] for k in right]
+        self.assertTrue(all(a >= b for a, b in zip(vals, vals[1:])), vals)
+
+    def test_rainbow_frame_tail_off(self):
+        colors = rainbow_frame(12.0)
+        for i, (x, _y) in enumerate(VPOSITIONS):
+            d = abs(((x - 12.0) % 44 + 22) % 44 - 22)
+            if d > 8:
+                self.assertEqual(colors[i], ZERO)             # 尾迹外全暗(含彩虹)
 
 
 if __name__ == "__main__":

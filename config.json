@@ -7,16 +7,16 @@
   "running": {
     "mode": "rainbow",
     "color": "#FF0000",
-    "fps": 30,
+    "fps": 45,
     "brightness": 100,
-    "speed": 40
+    "speed": 30
   },
   "waiting": {
     "mode": "flow",
     "color": "#FF0000",
-    "fps": 30,
+    "fps": 45,
     "brightness": 100,
-    "speed": 40
+    "speed": 30
   },
   "done": {
     "color": "#00FF00",
@@ -33,8 +33,8 @@
     "fail_flash_secs": 30,
     "waiting_on_ms": 150,
     "waiting_off_ms": 100,
-    "speed": 40,
-    "fps": 30,
+    "speed": 30,
+    "fps": 45,
     "brightness": 100,
     "tail": 8,
     "effect": "flow"

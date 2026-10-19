@@ -42,15 +42,15 @@ STATUS_FILE = os.path.join(ROOT, "status.json")
 
 DEFAULTS = {
     "device": {"vid": "258A", "pid": "00C1", "preferred_collection": "Col05"},
-    "running": {"mode": "rainbow", "color": "#FF0000", "fps": 30, "brightness": 100, "speed": 40},
+    "running": {"mode": "rainbow", "color": "#FF0000", "fps": 45, "brightness": 100, "speed": 30},
     "done": {"color": "#00FF00", "mode": "flash", "times": 3, "on_ms": 200, "off_ms": 120},
-    "waiting": {"mode": "flow", "color": "#FF0000", "fps": 30, "brightness": 100, "speed": 40},
+    "waiting": {"mode": "flow", "color": "#FF0000", "fps": 45, "brightness": 100, "speed": 30},
     "idle": {"mode": "hardware"},
     "conflict": {"close_rk_app": False},
     "partition": {"enabled": True, "fail_flash_secs": 30,
                   "waiting_on_ms": 150, "waiting_off_ms": 100,
                   "effect": "flow", "breathe_period": 2.0,
-                  "speed": 40, "fps": 30, "brightness": 100, "tail": 8.0},
+                  "speed": 30, "fps": 45, "brightness": 100, "tail": 8.0},
     "sources": {"workbuddy": {"color": "#00E676"}, "codex": {"color": "#2979FF"}},
     "codex": {"enabled": True, "sessions_dir": "~/.codex/sessions", "poll_secs": 2},
     "service": {"port": 18990, "stale_session_secs": 600, "final_grace_secs": 30,

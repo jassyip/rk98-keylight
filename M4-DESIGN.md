@@ -363,3 +363,20 @@ v2 推送后用户再次截图报障。截图定位 v2 遗留缺陷：
 **测试**：`tests/test_partition.py` 新增 `TestBrightnessAndEffects`（12 用例）：bfactor 百分比换算与非法回落、row_breathe_map 包络/lit_count、compose_frame 的 breathe 分支（按 `row_phase` 反解确定性命中波前）、brightness=100 峰值键=来源色满值 / 50 半亮、`_migrate_brightness` 迁移语义、DEFAULTS 全为 100。**33/33 通过**（test_rescan 12/12、test_codex_tail 同步通过）。
 
 踩坑记录：呼吸 1/4 周期处 `cos(π/2)` 浮点误差（6.1e-17）使 255×0.5 落到 127.4999…→round 127，断言需容差 ±1；`row_phase(now,speed,...) = xmin-tail + (now*speed)%span`，扫时间采样只能逼近波前，精确断言要反解 `now = ((x-(xmin-tail))%span)/speed`。
+
+### 11.8 流水灯平滑化：参考 RK98 官方驱动观感（2026-10-19，用户报障"生硬"）
+
+用户反馈全局流水灯效果生硬，要求参考 RK98 官方驱动重新配置、增加速度流畅度。
+
+**官方驱动取证**（`C:\Program Files (x86)\RK Keyboard Software`）：`Cfg.ini` `DevName34=00C1,RK98-100KRGB N Keyboard` 确认本机型号；`Dev/00C1/KB.ini` `LayoutKeyNum=100` + `LedOptN=animation,speed,light,direct,random,colornum` 六元组描述每档效果支持的调节项（第 2 位=可调速度）。官方 UI 速度档位实测观感：慢档循环一周≈4s、中档≈2s、快档≈1s，换算列坐标(37 列+8 尾迹, span 53)≈13/26/53 列每秒。官方流水是软波前+平滑拖尾。
+
+**根因诊断**（先测后改，勿凭记忆）：帧生成不是瓶颈——`flow_frame` 0.225ms/帧、`rainbow_frame` 0.141ms/帧（≈4000fps 上限，按列缓存前）；12fps 瓶颈在 USB Feature 报表传输（8 报表/帧，实测裸写 42fps）。（修正 M4 记忆里"12fps 是彩虹帧 Python 计算成本"的旧结论，错。）"生硬"是纯视觉算法问题：线性衰减 `1-|x-phase|/tail` 波前硬切、相邻键等差跳变（每格 12.5%）、拖尾等宽条纹。
+
+**改动**：
+- `effects.py` 新增 `_falloff(u)=0.5-0.5cos(pi*u)` 平滑衰减（两端导数为 0，软亮起/软熄灭）；`flow_frame`/`rainbow_frame`/`row_flow_map`（全局与分区共用）全部切换；`flow_frame`/`rainbow_frame` 增加按列缓存（同 x 键共享亮度，37 列 vs 100 键）
+- 默认速度 `speed` 40/50 → **30**（≈官方中档，循环一周 1.8s）；默认帧率 `fps` 30 → **45**（贴 USB 实测 42fps 上限）；滑条范围 5-120 / 10-60 不变
+- `config.json` 两仓同步；DEFAULTS 同步
+
+**测试**：新增 `TestFlowSmoothing`（8 用例）：`_falloff` 端点/中点/单调性/两端软边（变化率 < 中点）、`flow_frame` 列缓存一致性、相邻列跳变 ≤ 21%、`row_flow_map` 波前满色与尾迹外全暗仍精确成立（旧断言不依赖曲线形状，无需改）、彩虹尾迹外全暗。**40/40 通过**（test_rescan 12/12、test_codex_tail 同步）。
+
+踩坑：单调性测试方向写反（`_falloff` 随 u 增大而增大，u=1 是满色不是全暗）——命名语义是"距波前的剩余距离比例"，改曲线时先画端点表再写断言。

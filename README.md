@@ -191,14 +191,14 @@ python src\install_hooks.py uninstall    :: 反向操作，同样先备份
 | --- | --- | --- |
 | `running.mode` | `rainbow` | `rainbow` 彩色流水 / `flow` 单色流水 / `breathe` 呼吸 |
 | `running.color` | `#FF0000` | 单色流水/呼吸用的颜色 |
-| `running.fps` / `speed` / `brightness` | 30 / 40 / 100 | 帧率上限 / 波速(列每秒) / 亮度(0-100 百分比) |
+| `running.fps` / `speed` / `brightness` | 45 / 30 / 100 | 帧率上限 / 波速(列每秒, RK 官方中档≈30) / 亮度(0-100 百分比) |
 | `waiting.mode` / `color` | `flow` / `#FF0000` | 待确认：红灯流水 |
 | `waiting.brightness` | `100` | 待确认亮度(0-100 百分比) |
 | `done.color` / `times` / `on_ms` / `off_ms` | `#00FF00` / 3 / 200 / 120 | 完成绿灯闪烁 |
 | `idle.mode` | `hardware` | 平常＝停流，交还自带灯效 |
 | `partition.enabled` | `true` | 分区模式总开关（关 = 全局单状态模式） |
 | `partition.effect` | `flow` | 分区运行中效果：`flow` 流水 / `breathe` 呼吸 |
-| `partition.speed` / `fps` / `brightness` | 40 / 30 / 100 | 与全局同规格（波速 / 帧率 / 亮度 0-100） |
+| `partition.speed` / `fps` / `brightness` | 30 / 45 / 100 | 与全局同规格（波速 / 帧率 / 亮度 0-100） |
 | `partition.breathe_period` | `2.0` | 分区呼吸效果周期（秒） |
 | `partition.waiting_on_ms` / `waiting_off_ms` | 150 / 100 | 待确认红闪的亮/灭时长 |
 | `partition.fail_flash_secs` | `30` | 任务失败红闪多久后释放 |

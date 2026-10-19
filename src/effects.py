@@ -6,6 +6,20 @@ from keymap import VPOSITIONS
 GRID_PERIOD = 44  # 相位循环: 37 列 + 前后各留 4 列尾部
 
 
+def _falloff(u):
+    """平滑衰减曲线: u∈[0,1] -> [1,0]。
+
+    参考 RK 官方驱动(RK98-100KRGB KB.ini LedOpt)流水观感: 波前平滑点亮、
+    拖尾平滑渐暗, 两端导数都为 0, 消除线性衰减的硬切跳变。
+    曲线 = 0.5-0.5cos(pi*u): u=1 满色 / u=0 全暗 / 中点 0.5。
+    """
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    return 0.5 - 0.5 * math.cos(math.pi * u)
+
+
 def hex_rgb(h):
     h = h.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -32,23 +46,36 @@ def solid_colors(rgb):
 
 
 def flow_frame(rgb, phase, tail=8.0):
-    """相位流水波: 波前 phase (列坐标), 尾迹 tail 列, 按键亮度随距波前距离衰减"""
+    """相位流水波: 波前 phase (列坐标), 尾迹 tail 列。
+
+    亮度 = _falloff(1-|x-phase|/tail) 平滑衰减(参考 RK 官方驱动观感);
+    同列按键共享一个亮度值(按 x 缓存, 37 列 x 重复 100 键)。
+    """
+    kcol = {}
     out = []
     for (x, _y) in VPOSITIONS:
-        k = max(0.0, 1.0 - abs(x - phase) / tail)
+        k = kcol.get(x)
+        if k is None:
+            k = _falloff(1.0 - abs(x - phase) / tail)
+            kcol[x] = k
         out.append(scale(rgb, k))
     return out
 
 
 def rainbow_frame(phase, tail=8.0):
-    """彩色流水: 色相随波前滚动"""
+    """彩色流水: 色相随波前滚动, 亮度衰减同 flow_frame(平滑)"""
+    cache = {}
     out = []
     for (x, _y) in VPOSITIONS:
-        d = (x - phase) % GRID_PERIOD
-        k = max(0.0, 1.0 - abs(d if d < GRID_PERIOD / 2 else d - GRID_PERIOD) / tail)
-        hue = ((x * 10 + phase * 8) % 360) / 360.0
-        r, g, b = _hsv(hue, 1.0, k)
-        out.append((r, g, b))
+        c = cache.get(x)
+        if c is None:
+            d = (x - phase) % GRID_PERIOD
+            d = d if d < GRID_PERIOD / 2 else d - GRID_PERIOD
+            k = _falloff(1.0 - abs(d) / tail)
+            hue = ((x * 10 + phase * 8) % 360) / 360.0
+            c = _hsv(hue, 1.0, k)
+            cache[x] = c
+        out.append(c)
     return out
 
 
@@ -83,11 +110,12 @@ def row_phase(now, speed, keys, tail=8.0):
 
 
 def row_flow_map(keys, rgb, phase, tail=8.0):
-    """排内流水: 按键亮度随距波前距离衰减; 返回 {key: color}, 暗键为 (0,0,0)"""
+    """排内流水: 按键亮度随距波前距离衰减(平滑曲线, 同 flow_frame);
+    返回 {key: color}, 暗键为 (0,0,0)"""
     out = {}
     for i in keys:
         x = VPOSITIONS[i][0]
-        k = max(0.0, 1.0 - abs(x - phase) / tail)
+        k = _falloff(1.0 - abs(x - phase) / tail)
         out[i] = scale(rgb, k) if k > 0.0 else (0, 0, 0)
     return out
 
