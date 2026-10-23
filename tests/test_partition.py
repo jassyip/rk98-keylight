@@ -18,7 +18,7 @@ from effects import (bfactor, flow_frame, hex_rgb, rainbow_frame,  # noqa: E402
                      row_breathe_map, row_flow_map, row_phase, scale,
                      sine_frame, solid_colors, stars_frame, stars_map,
                      wave_frame)
-from effects import _falloff, _star_k, lit_row_wave_map  # noqa: E402
+from effects import _falloff, _star_k, lit_row_wave_map, row_xrange  # noqa: E402
 from keymap import NUMPAD_LEFT, NUMPAD_RIGHT, ROWS, VPOSITIONS  # noqa: E402
 from partition import PartitionManager  # noqa: E402
 
@@ -640,6 +640,57 @@ class TestTimerResolution(unittest.TestCase):
         self.assertFalse(second)
         restore_timer_resolution()
         self.assertFalse(_timer_raised)
+
+
+class TestMultiTaskRows(unittest.TestCase):
+    """多任务并行: 每个任务独占一排, 且各排流水必须错峰。
+
+    2026-10-23 用户报障"四个任务只有一条灯条在跑"——
+    ① 任务被 FinalStop 误杀(见 test_rescan.test_finalstop_keeps_other_sessions);
+    ② 即使四排都在亮, 若相位完全相同, 光带落在同一列, 视觉上仍像一条竖线。
+    """
+
+    def test_row_phase_offset_stays_in_span(self):
+        """offset 必须在 span 内取模, 否则波前越界会让整排全黑"""
+        keys = ROWS[0]
+        xmin, xmax = row_xrange(keys)
+        tail = 8.0
+        span = (xmax - xmin) + 2 * tail
+        for off in (0.0, 5.0, 30.0, 100.0, span * 3):
+            p = row_phase(1.7, 30.0, keys, tail, off)
+            self.assertGreaterEqual(p, xmin - tail - 1e-9)
+            self.assertLess(p, xmin - tail + span + 1e-9)
+
+    def test_four_tasks_occupy_four_rows(self):
+        m = PartitionManager(copy.deepcopy(CFG))
+        for i in range(4):
+            m.signal("workbuddy", "sid-%d" % i, "START")
+        self.assertEqual(sorted(t.slot for t in m.tasks.values()), [0, 1, 2, 3])
+
+    def test_four_rows_lit_and_out_of_phase(self):
+        """四排都能亮, 且存在四排同时亮但重心分散的时刻(相位错峰生效)"""
+        m = PartitionManager(copy.deepcopy(CFG))
+        for i in range(4):
+            m.signal("workbuddy", "sid-%d" % i, "START")
+        lit = {r: False for r in range(4)}
+        spread = None
+        for k in range(240):
+            colors = m.compose_frame(now=k * 0.05)
+            xs_by_row = []
+            for r in range(4):
+                xs = [VPOSITIONS[i][0] for i in ROWS[r] if colors[i] != ZERO]
+                lit[r] = lit[r] or bool(xs)
+                xs_by_row.append(xs)
+            if all(xs_by_row):
+                c = [sum(xs) / float(len(xs)) for xs in xs_by_row]
+                d = max(c) - min(c)
+                if spread is None or d > spread[0]:
+                    spread = (d, c)
+        for r, ok in lit.items():
+            self.assertTrue(ok, "第 %d 排从未亮过(多任务应各亮一排)" % r)
+        self.assertIsNotNone(spread, "从未出现四排同时亮的时刻")
+        self.assertGreater(spread[0], 2.0,
+                           "四排流水同相位(看起来像一条灯条): %s" % (spread[1],))
 
 
 if __name__ == "__main__":

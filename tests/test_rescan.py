@@ -121,6 +121,50 @@ class TestRescanPartition(unittest.TestCase):
         svc.rescan_sessions()
         self.assertEqual(set(svc.mgr.tasks), {"sid-a"})
 
+    # ---------- 多任务并发(2026-10-23 用户报障"四个任务只有一条灯条") ----------
+    def test_four_sessions_get_distinct_slots(self):
+        """4 个活跃会话 -> 各占一排, slot 必须是 0/1/2/3 且互不重复"""
+        sids = ["sid-a", "sid-b", "sid-c", "sid-d"]
+        cfg, root, hpath = make_env(self.tmp, [(s, 5) for s in sids])
+        svc = keylight.Service(cfg)
+        self.assertEqual(svc.rescan_sessions(), 4)
+        slots = [svc.mgr.tasks[s].slot for s in sids]
+        self.assertEqual(sorted(slots), [0, 1, 2, 3],
+                         "会话槽位重复或缺失: %s" % dict(zip(sids, slots)))
+
+    def test_finalstop_keeps_other_sessions(self):
+        """A 会话 FinalStop 不得误杀 B/C — 即使它们已经 40 秒没事件。
+
+        历史 bug: FinalStop 时 close_stale(now - final_grace_secs=30)
+        把其它"沉默"会话一并清掉, 多任务并行时表现为只剩一条灯条。
+        """
+        cfg, root, hpath = make_env(self.tmp, [("sid-a", 5), ("sid-b", 5), ("sid-c", 5)])
+        svc = keylight.Service(cfg)
+        self.assertEqual(svc.rescan_sessions(), 3)
+        now = time.time()
+        # 模拟 B/C 正在长生成: 40 秒没有任何 hook 事件(> 旧的 30s 宽限)
+        for tid in ("sid-b", "sid-c"):
+            svc.mgr.tasks[tid].last_seen = now - 40
+        svc._handle_partition({"session_id": "sid-a", "cwd": "D:\\work\\a"},
+                              "FinalStop", "sid-a", now)
+        self.assertIn("sid-b", svc.mgr.tasks, "FinalStop 误杀了他会话 B")
+        self.assertIn("sid-c", svc.mgr.tasks, "FinalStop 误杀了他会话 C")
+        self.assertEqual(svc.mgr.tasks["sid-b"].state, "RUNNING")
+        self.assertEqual(svc.mgr.tasks["sid-c"].state, "RUNNING")
+        # 本会话 A 正常进入完成态(绿闪后由 janitor 释放), 不影响他人
+        self.assertEqual(svc.mgr.tasks["sid-a"].state, "DONE")
+
+    def test_many_sessions_overflow_to_numpad(self):
+        """超过 6 个会话 -> 多出的进溢出区(slot=None), 不占别人的排"""
+        sids = ["sid-%d" % i for i in range(8)]
+        cfg, root, hpath = make_env(self.tmp, [(s, 5) for s in sids])
+        svc = keylight.Service(cfg)
+        self.assertEqual(svc.rescan_sessions(), 8)
+        slots = sorted(t.slot for t in svc.mgr.tasks.values() if t.slot is not None)
+        self.assertEqual(slots, [0, 1, 2, 3, 4, 5])
+        overflow = [t for t in svc.mgr.tasks.values() if t.slot is None]
+        self.assertEqual(len(overflow), 2)
+
 
 class TestRescanGlobal(unittest.TestCase):
     def setUp(self):

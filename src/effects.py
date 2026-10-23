@@ -101,12 +101,18 @@ def row_xrange(keys):
     return min(xs), max(xs)
 
 
-def row_phase(now, speed, keys, tail=8.0):
+def row_phase(now, speed, keys, tail=8.0, offset=0.0):
     """该排当前流水波前位置: 在 [xmin-tail, xmax+tail] 间匀速循环
-    (波前只在该排范围内扫描, 观感 = 波浪沿这一排跑)"""
+    (波前只在该排范围内扫描, 观感 = 波浪沿这一排跑)
+
+    offset: 排级相位错峰(列)。多任务各占一排时若相位完全相同, 四排的
+    光带会同时出现在同一列, 看起来像"一条竖线在扫"(2026-10-23 用户
+    报障"四个任务只有一条灯条")。传 slot 相关的偏移即可让各排此起彼伏。
+    偏移会在 span 内取模, 不会让波前越界导致整排全黑。
+    """
     xmin, xmax = row_xrange(keys)
     span = float(xmax - xmin) + 2.0 * tail
-    return xmin - tail + (now * speed) % span
+    return xmin - tail + (now * speed + float(offset)) % span
 
 
 def row_flow_map(keys, rgb, phase, tail=8.0):

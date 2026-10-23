@@ -329,7 +329,9 @@ class PartitionManager:
         elif effect == "wave":
             m = lit_row_wave_map(keys, rgb, now, speed, tail, wave_off, lit)
         else:
-            phase = row_phase(now, speed, keys, tail)
+            # 流水: 波前按排号错峰(offset), 否则多排同相位 = 一条竖线扫过,
+            # 看不出是"每个任务一排"(2026-10-23 用户报障)
+            phase = row_phase(now, speed, keys, tail, wave_off)
             m = lit_row_flow_map(keys, rgb, phase, tail, lit)
         for i, c in m.items():
             if c != ZERO:

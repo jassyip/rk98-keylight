@@ -398,3 +398,29 @@ v2 推送后用户再次截图报障。截图定位 v2 遗留缺陷：
 - 面板：效果下拉改官方名；速度滑条旁加官方档位参考（慢≈13/中≈26/快≈53 列/秒，由官方循环周期 4s/2s/1s ÷ span 53 换算）
 
 **测试**：新增 `TestOfficialEffects` 14 用例 + `TestTimerResolution` 1 用例 → partition **55/55**、rescan 12/12、codex_tail 过。踩坑：①正弦关于波峰对称，档位天然折叠到 ~13，阈值别照抄流水；②"相邻列"要按 b=a+1 过滤，x=28/30/32 之间隔着不存在的列（29/31/33/35 无键）；③繁星 lit 子集断言别枚举亮度值（三次方包络），用"源色等比缩放"判定助手。
+
+### 11.10 多任务只显示一条灯条：FinalStop 误杀 + 流水同相位（2026-10-23 用户报障）
+
+用户报障"四个任务只有一条灯条在跑"。日志取证：4 个会话的会话文件 mtime 全部在 2 分钟内、都在活跃，但服务任务表只剩 1 条。
+
+**根因 1：FinalStop 跨会话误杀（主因）**
+`_handle_partition` 收到任意会话的 `FinalStop` 时执行
+`close_stale("workbuddy", now - final_grace_secs=30)`，把**所有** `last_seen` 早于 30 秒的任务清掉。多任务并行时，某个会话长时间生成/思考（30 秒没有任何工具调用事件）完全正常，于是"任何一个窗口结束"都会顺手杀掉别的窗口的任务。日志实证：
+
+```
+10:04:33  FinalStop 清理沉默任务: ['xxxxxxxx']   <- 另一会话被误杀
+10:27:01  FinalStop 清理沉默任务: ['yyyyyyyy']   <- 本会话也被误杀
+```
+
+修复：`FinalStop` 只 `END` 自己的 sid，不再跨会话清理；跨会话僵死统一交给 `PartitionManager.janitor` 的 `stale_session_secs`（600s）。`close_stale()` 保留为手动工具但不再被事件路径调用。
+
+**根因 2：四排流水同相位（次因，视觉层）**
+即使四排都各自亮着，`row_phase(now, speed, keys, tail)` 不含排级偏移，四排波前落在同一列 —— 视觉上是一条竖直光带贯穿四排，仍然像"只有一条灯条"。修复：`row_phase` 新增 `offset` 参数（在 span 内取模，不会越界导致整排全黑），分区 `flow` 分支传 `wave_off = slot * 5.0`（与 `wave` 效果共用同一套排级错峰）；溢出区沿用 30/35 偏移。
+
+**测试**：新增 6 用例
+- `test_rescan.py`：`test_four_sessions_get_distinct_slots`（4 会话 → slot 0/1/2/3 不重复）、`test_finalstop_keeps_other_sessions`（B/C 静默 40s，A FinalStop → B/C 仍 RUNNING）、`test_many_sessions_overflow_to_numpad`（8 会话 → 6 排队 + 2 溢出）→ **15/15**
+- `test_partition.py`：`test_row_phase_offset_stays_in_span`（offset 取模不越界）、`test_four_tasks_occupy_four_rows`、`test_four_rows_lit_and_out_of_phase`（扫 240 个时间点，找四排同时亮且亮区重心分散的时刻）→ **58/58**
+
+**端到端验证**：重启服务 + `RESCAN` 恢复 4 任务（slot 0-3，54fps）；向 `/event` 注入**不存在的 sid** 的 `FinalStop`，旧代码会清空全部任务，实测四任务全部保留。
+
+教训：`final_grace_secs=30` 这种"短宽限跨会话清理"在多任务并行场景必然误杀 —— 活性判断只能按单个会话自己的 stale 阈值（600s）做；另外"每排独立"必须同时成立在**数据层（槽位不重复）**和**视觉层（相位错峰）**两处，只修一个仍会被用户判为"只有一条"。

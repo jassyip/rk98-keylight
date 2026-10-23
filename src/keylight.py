@@ -289,13 +289,20 @@ class Service:
                 # 任何其它工具(含提问工具返回) = 已答复, 解除等待
                 mgr.signal("workbuddy", sid, "HEARTBEAT")
         elif ev in END_EVENTS or ev == "FinalStop":
-            if ev == "FinalStop":
-                # 清理没收到 Stop 的沉默会话(否则永远占着排)
-                grace = float(self.cfg["service"].get("final_grace_secs", 30))
-                dead = mgr.close_stale("workbuddy", now - grace)
-                if dead:
-                    log.info("FinalStop 清理沉默任务: %s", [d[:8] for d in dead])
+            # 只结束本会话的任务。
+            # 2026-10-23 修复(用户报障"四个任务只有一条灯条在跑"):
+            # 原实现在 FinalStop 时执行 close_stale(now - 30s), 把"30 秒内
+            # 没有事件"的**其他**会话当成沉默任务清掉。但多任务并行时, 某个
+            # 会话长时间生成/思考(超过 30s 没有任何工具调用)非常正常, 于是
+            # 任何一个窗口结束都会顺手杀掉别的窗口的任务 -> 任务表只剩一条。
+            # 跨会话僵死统一交给 janitor 的 stale_session_secs(默认 600s)。
             mgr.signal("workbuddy", sid, "END")
+            with mgr.lock:
+                alive = [t for t in mgr.tasks.values()
+                         if t.task_id != sid and t.state in ("RUNNING", "WAITING")]
+            if alive:
+                log.info("FinalStop(%s) 结束本会话, 保留其余 %d 个任务",
+                         sid[:8], len(alive))
         elif ev in CLOSE_EVENTS:
             # 会话关闭 -> 直接释放不闪绿(不算完成)
             mgr.signal("workbuddy", sid, "CLOSE")
