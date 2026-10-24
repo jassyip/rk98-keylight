@@ -83,7 +83,9 @@ python src\keylight.py run
 python src\install_hooks.py install
 ```
 
-这会向 `~/.workbuddy/settings.json` **追加** 9 个事件的转发命令，**不会动你已有的任何 hook**，并自动备份原文件。
+这会向 `~/.workbuddy/settings.json` **追加** 9 个事件的转发命令，**不会动你已有的任何 hook**，并自动备份原文件。重复执行 `install` 会把已有注册**原地升级**成当前命令，改完需要重启 WorkBuddy 才会加载。
+
+转发器用裸 socket，**每个阻塞点都有硬上限**（stdin 0.9s / 连接 0.35s / 回包 0.2s），永远 `exit 0`；注册时自动挑基础解释器 + `-I -S`（启动 0.28s，venv 全量 site 要 0.86s）。单次转发实测 0.5s。
 
 ```bat
 python src\install_hooks.py uninstall    :: 反向操作，同样先备份
@@ -315,6 +317,7 @@ rk98-keylight/
 | 找不到灯效接口 | 切到蓝牙/2.4G 了 → 插回 USB 线 |
 | 绿灯不闪 | 事件源没注册 → 跑 `install_hooks.py install`；或用 `/test` 手动验证灯效本身 |
 | 提示端口被占用 | 已有实例在跑 → 双击 `start.bat` 会自动只弹设置窗口；或先 `stop.bat` |
+| `Hook timed out after 3000ms` / `operation blocked by hook` | 事件转发超预算：跑 `install_hooks.py install` 原地升级（新版转发器有界 + `-I -S` 解释器），然后重启 WorkBuddy；`tests\test_hook.py` 应 5/5 通过 |
 | 双实例抢键盘 | 启动前会探端口，占用即拒绝启动，不会出现 |
 | 托盘不出现 | Python 缺 tkinter → 用 `python src\keylight.py run` 控制台模式 |
 

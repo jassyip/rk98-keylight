@@ -14,9 +14,28 @@ import time
 HOME = os.path.expanduser("~")
 SETTINGS = os.path.join(HOME, ".workbuddy", "settings.json")
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook.py")
-# hook 只用标准库(裸 socket), 所以直接用当前解释器即可 —— 不硬编码任何用户路径
-PYTHON_EXE = sys.executable or "python"
-HOOK_COMMAND = f'"{PYTHON_EXE}" "{HOOK_SCRIPT}"'
+
+
+def _fast_python():
+    """挑一个启动最快、且不依赖 site-packages 的解释器。
+
+    hook 只用标准库, 而实测同一台机器上:
+      venv 解释器(默认加载 site) `-c pass` 0.86s / `-S` 0.53s
+      基础解释器 `-I -S` 0.28s
+    3 秒预算下这 0.6s 差别很关键, 所以优先用 sys._base_executable(venv 里指向
+    基础解释器), 配 `-I -S`(隔离模式 + 不加载 site)。
+    """
+    base = getattr(sys, "_base_executable", "") or ""
+    if not (base and os.path.exists(base)):
+        base = sys.executable
+    return base.replace("\\", "/")
+
+
+PYTHON_EXE = _fast_python()
+HOOK_COMMAND = f'"{PYTHON_EXE}" -I -S "{HOOK_SCRIPT}"'
+# 实测：修掉无界 stdin 阻塞后内部最坏 1.05s、典型 ~0.3s。
+# timeout 仍留 10s 余量：async hook 不阻塞对话，超时只会白扔一条事件。
+HOOK_TIMEOUT = 10
 MARKER = "rk98-keylight"
 
 EVENTS = [
@@ -39,9 +58,20 @@ def our_group():
             "type": "command",
             "command": HOOK_COMMAND,
             "async": True,
-            "timeout": 3,
+            "timeout": HOOK_TIMEOUT,
         }],
     }
+
+
+def _is_current(h):
+    """该 hook 项是否已是当前期望的命令/超时(用于原地升级)"""
+    if not isinstance(h, dict) or MARKER not in str(h.get("command", "")):
+        return False
+    try:
+        timeout = int(h.get("timeout") or 0)
+    except Exception:
+        timeout = 0
+    return str(h.get("command", "")) == HOOK_COMMAND and timeout == HOOK_TIMEOUT
 
 
 def is_ours(group):
@@ -73,17 +103,32 @@ def install():
 
     doc = load()
     hooks = doc.setdefault("hooks", {})
-    added, existed = [], []
+    added, existed, updated = [], [], []
     for ev in EVENTS:
         groups = hooks.setdefault(ev, [])
-        if any(is_ours(g) for g in groups):
-            existed.append(ev)
+        ours = [g for g in groups if is_ours(g)]
+        if not ours:
+            groups.append(our_group())
+            added.append(ev)
             continue
-        groups.append(our_group())
-        added.append(ev)
+        # 已注册过: 命令/超时不是当前版本就原地升级(早期版本用 venv 解释器、
+        # timeout=3, 且脚本存在无界 stdin 阻塞, 会报 Hook timed out)
+        changed = False
+        for g in ours:
+            for h in g.get("hooks", []):
+                if not isinstance(h, dict) or MARKER not in str(h.get("command", "")):
+                    continue
+                if _is_current(h):
+                    continue
+                h["command"] = HOOK_COMMAND
+                h["timeout"] = HOOK_TIMEOUT
+                h["async"] = True
+                changed = True
+        (updated if changed else existed).append(ev)
     save(doc)
     print(f"新注册事件 ({len(added)}): {', '.join(added) or '无'}")
-    print(f"已存在跳过 ({len(existed)}): {', '.join(existed) or '无'}")
+    print(f"原地升级 ({len(updated)}): {', '.join(updated) or '无'}")
+    print(f"已是最新跳过 ({len(existed)}): {', '.join(existed) or '无'}")
     print(f"hook 命令: {HOOK_COMMAND}")
 
 
